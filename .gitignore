@@ -1,0 +1,18 @@
+# 依赖
+node_modules/
+.pnpm-store/
+
+# npm 缓存（沙箱里临时指过来的）
+.npmcache/
+
+# 参考源码：官方 @tencent-connect/dsh-qqbot 的解包，只作 API 参考，不进仓库
+.ref/
+
+# 打包产物
+*.tgz
+
+# 日志与临时文件
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
