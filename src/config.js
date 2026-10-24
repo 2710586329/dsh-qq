@@ -96,7 +96,7 @@ export const ConfigSchema = Schema.object({
     .description('群里另一个机器人说话时要不要接（关着 = 同类说啥都不理，连 @ 也不接）'),
   peerBots: Schema.array(Schema.string())
     .default([])
-    .description('已知的同类机器人 QQ 号；填了才认得出「这句是别的鱼发的」（NapCat 也带 is_robot 时同样认）'),
+    .description('已知的同类机器人 QQ 号；填了才认得出「这句是别的机器人发的」（NapCat 也带 is_robot 时同样认）'),
   privateMode: Schema.union(['open', 'allowlist', 'disabled'])
     .default('open')
     .description('私聊访问控制：open 全部 / allowlist 仅白名单 / disabled 关闭私聊'),

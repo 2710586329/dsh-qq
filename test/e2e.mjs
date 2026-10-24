@@ -86,7 +86,7 @@ const config = Config({
   groupReplyGapMs: 0, // 同上：均匀间隔单独用一个用例验，别拖慢其他断言
   persona: '你叫小满，是个住在电脑里的助手。',
   ownerIds: ['69099923'],
-  peerBots: ['10002'], // 测试里把「另一只鱼」登记成同类，才测得了「开关关着不接」
+  peerBots: ['10002'], // 测试里把「另一个机器人」登记成同类，才测得了「开关关着不接」
   contextSwapMinTokens: 1000,
 })
 
@@ -183,10 +183,10 @@ mock.emitEvent({
   group_id: 88888,
   user_id: 1,
   message_id: 203,
-  raw_message: '[CQ:at,qq=99999] 来帮本鲸测一下',
+  raw_message: '[CQ:at,qq=99999] 来帮它测一下',
   message: [
     { type: 'at', data: { qq: '99999', name: '另一个机器人' } },
-    { type: 'text', data: { text: ' 来帮本鲸测一下' } },
+    { type: 'text', data: { text: ' 来帮它测一下' } },
   ],
   sender: { user_id: 1, nickname: '路人' },
 })
@@ -341,8 +341,8 @@ assert.equal(
 )
 console.log('✓ 模型回 [SILENT] 就不发')
 
-// —— 同类机器人（群里另一只鱼）：吵架开关关着就完全不接，连 @ 都不接 ——
-assert.equal(config.botChatEnabled, false, '默认应该关着：鱼和鱼之间的帐先不算')
+// —— 同类机器人（群里另一个机器人）：吵架开关关着就完全不接，连 @ 都不接 ——
+assert.equal(config.botChatEnabled, false, '默认应该关着：同类之间的帐先不算')
 const beforePeer = groupAgent.received.length
 mock.emitEvent({
   post_type: 'message',
@@ -396,7 +396,7 @@ await waitFor(() => groupAgent.received.length === beforePeer + 2, { what: '同�
 assert.match(textOf(groupAgent.received[beforePeer + 1]), /· 同类机器人/, '同类发言在历史里应该标「· 同类机器人」')
 console.log('✓ 同类机器人在历史里标「· 同类机器人」')
 
-// —— 没有 @ 就不接，主人也一样（2026-10-24 取消「主人永久免 @」：主人说「只回我确实看着怪」）——
+// —— 没有 @ 就不接，主人也一样（2026-10-24 取消「主人永久免 @」）——
 // 用一个没人 @ 过的新群，免得蹭到前面用例开出来的窗口
 const totalBefore = created.reduce((n, a) => n + a.received.length, 0)
 mock.emitGroupText({ groupId: 88891, userId: 69099923, nickname: '主人', text: '我随便说一句', messageId: 308 })
@@ -406,7 +406,7 @@ assert.equal(totalAfter, totalBefore, '没 @ 也没在保活期，主人说话�
 console.log('✓ 没 @ 就不接，主人也不例外')
 
 // —— 均匀回应：两条回复至少隔一段，间隔里的消息攒起来下次一起看见 ——
-// （主人 2026-10-24：「每窗口最多回 N 次」跟毛糙蛋的「发消息刷新保活」打架，换成间隔来做「均匀」）
+// （2026-10-24：「每窗口最多回 N 次」跟「窗口内说话续期」打架，换成间隔来做「均匀」）
 config.groupReplyGapMs = 1500
 config.groupRepliesPerWindow = 0
 mock.emitGroupText({ groupId: 88890, userId: 777, nickname: '路人甲', text: '@机器人 开始', messageId: 501, atSelf: true })
@@ -429,12 +429,12 @@ config.groupReplyGapMs = 0
 console.log('✓ 均匀回应：间隔内的消息攒起来，下次一起看见')
 
 // —— 跳过的群消息也要进上下文（2026-10-24 群里实测踩的坑）——
-// 廖方说「天意的大手发力了」没 @ 我们 → 跳过；两分钟后主人接一句「确实天意的大手」，
-// 它却回「天意也是主人的手呀」—— 因为它压根没看见前面那句，只能顺着主人的话编。
+// 群友 A 说了个梗没 @ 我们 → 跳过；两分钟后主人接一句同款的话，
+// 它却顺着主人的话往下编 —— 因为它压根没看见前面那句。
 // 跳过归跳过（不叫醒它），但话得让它看得见。
-mock.emitGroupText({ groupId: 88889, userId: 867107431, nickname: '廖方', text: '天意的大手发力了', messageId: 401 })
+mock.emitGroupText({ groupId: 88889, userId: 20001, nickname: '群友甲', text: '天意的大手发力了', messageId: 401 })
 await sleep(300)
-mock.emitGroupText({ groupId: 88889, userId: 867107431, nickname: '廖方', text: '@机器人 这啥意思', messageId: 402, atSelf: true })
+mock.emitGroupText({ groupId: 88889, userId: 20001, nickname: '群友甲', text: '@机器人 这啥意思', messageId: 402, atSelf: true })
 await waitFor(
   () => created.some((a) => a.received.some((m) => textOf(m).includes('这啥意思'))),
   { what: '被跳过的群消息补进上下文' },

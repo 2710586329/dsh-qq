@@ -2,6 +2,11 @@
 
 本文件记录 dsh-qq 的版本变更。格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号照 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+### 文档
+- README 新增「私用和发布是两层」：代码层只放跟角色无关的通用规矩，人设和称呼一律留在配置层（`persona` / `directPrompt` / `groupPrompt` / `ownerLabel`），提 PR 时不要把私人称呼、真实 QQ 号、群里的梗写进 `src/`。
+- 清掉 `src/` 与 `test/` 里最后一批评测用真号与私人称呼：`src/config.js` 的 `peerBots` 描述「别的鱼」→「别的机器人」；`test/e2e.mjs`、`test/context-guard.test.mjs` 里的真人昵称、真实 QQ 号、群梗一律换成 `群友甲` / `20001` / `10003`。
+
 ## [0.5.0] - 2026-10-24
 ### 新增
 - **认时间**：以前它只能靠上下文里残留的旧时间戳猜「现在几点」，白天能认成晚上。
