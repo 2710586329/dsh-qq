@@ -1,6 +1,6 @@
 {
   "name": "dsh-qq",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "QQ channel plugin for DeepSeek Harness via OneBot 11 / NapCat — private chats and group chats with your agent.",
   "type": "module",
   "main": "./src/index.js",
