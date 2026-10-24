@@ -6,6 +6,9 @@
 
 > ⚠️ **先说清楚**：NapCat 属于「QQ 协议端」，跑在你自己登录的 QQ 客户端上，**不符合腾讯的用户协议**。用小号、别和常用号同一台设备、别发垃圾消息，账号有被风控或封禁的可能。插件只负责把 OneBot 消息转给 Agent，协议端本身怎么合规、怎么稳，由你自己负责。场景能用 [QQ 官方机器人](https://bot.q.qq.com/) 的，优先用官方的。
 
+> 📢 **这是个公开仓库**：MIT，随便取用、改、再发。作者是个人不是公司，没有客服、没有 SLA，能回 issue 但不保证秒回。
+> 提 issue 或贴日志之前，请先把 **token、真实 QQ 号、本机路径** 抹掉——发出去就收不回来了。
+
 ```
 你的 QQ 客户端  ←→  NapCat（协议端，注入 QQ）
                         ↕  OneBot v11 WebSocket
@@ -42,18 +45,36 @@
 
 ### 2. 装插件
 
-```bash
-# 本地目录（开发 / 自用）
-npx @deepseek-ai/dsh plugin --profile desktop add "D:/path/to/dsh-qq"
+**先把 DSH 完全退出**（托盘也要退掉，插件文件被占用会装到一半失败）。
 
-# 或者用打好的包分享给别人
-pnpm pack
-npx @deepseek-ai/dsh plugin add ./dsh-qq-0.7.1.tgz
+```powershell
+# ① 从 Releases 下载 Source code (zip) 解压，或者 git clone 一份
+# ② 用 DSH 自带的那条 dsh 装（不是 npx）
+dsh plugin --profile desktop add "D:\dsh-qq-0.7.1"
 ```
 
-装完 `$DSH_HOME/profiles/<你的 profile>/cordis.patch.yml` 里会多一行 `dsh-qq`，配置就改那一行。
+三个容易踩的坑：
 
-### 3. 填连接信息，重启 DSH
+- **必须用 DSH 自带的 `dsh`，不能 `npx @deepseek-ai/dsh`。** `desktop` 这份 profile 由桌面端独占管理，npx 会直接报 `profile "desktop" is managed exclusively by the Electron application`。PATH 里找不到 `dsh` 就用完整路径：
+  ```powershell
+  & "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add "D:\dsh-qq-0.7.1"
+  ```
+- **`--profile` 不能省**，省了直接报 `error: --profile <name> is required`。
+- **写绝对路径**，相对路径是按你敲命令那一刻的当前目录算的。
+
+装完它会自动写进 `$DSH_HOME/profiles/desktop/package.json` 的 `dsh.profile.bundles`（默认就启用），启动后在 **设置 → 插件** 里能看到。想确认装没装上：
+
+```powershell
+dsh plugin --profile desktop why dsh-qq
+```
+
+> Release 里如果挂了 `.tgz` 附件（或者自己 `pnpm pack` 打一个），把上面的路径换成那个文件就行。
+
+### 3. 重启 DSH，填连接信息
+
+重新打开 DSH → **设置 → QQ**，把 `wsUrl` 和 `accessToken` 填进去就行（34 项都在那个面板上，改完即时生效）。
+
+想直接写配置文件也可以，改 `$DSH_HOME/profiles/desktop/cordis.patch.yml` 里 `dsh-qq` 那一段（整段替换，不是往下叠）：
 
 ```yaml
 - id: dsh-qq

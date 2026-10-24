@@ -19,10 +19,13 @@
 
 ## 1. 装上、连上
 
-```bash
-npx @deepseek-ai/dsh plugin add "D:/path/to/dsh-qq"
-# 然后在 <profile>/cordis.patch.yml 里补 config，重启 DSH
+```powershell
+# 装之前：DSH 完全退出（托盘也退）
+dsh plugin --profile desktop add "D:\dsh-qq-0.7.1"   # 或 .tgz 文件路径
+# 装完：重开 DSH，去 设置 → QQ 填 wsUrl / accessToken（想手写就改 cordis.patch.yml）
 ```
+
+> 用 DSH 自带的 `dsh`，不要 `npx @deepseek-ai/dsh`（desktop 由桌面端独占管理）；`--profile` 必须写。
 
 - [ ] 日志出现 `已连接 ws://127.0.0.1:3001`
 - [ ] 日志没有反复 `连接错误` 刷屏
