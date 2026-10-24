@@ -45,7 +45,7 @@ export const ConfigSchema = Schema.object({
     ),
   ownerLabel: Schema.string()
     .default('主人')
-    .description('群聊里怎么称呼这位主人，例如「主人」「老板」；默认「主人」'),
+    .description('群聊里怎么称呼这位主人，例如「老板」「老大」；默认「主人」'),
   directPrompt: Schema.string()
     .default('')
     .description('私聊时追加到每条投递文字最前面的补充指令（内置聊天规矩在 preset 里，这里放你自己的）'),
@@ -67,8 +67,18 @@ export const ConfigSchema = Schema.object({
     .default(true)
     .description('群聊里是否必须 @ 机器人才回复'),
   groupWakeMs: Schema.number()
-    .default(300000)
-    .description('群里被 @ 过一次之后，多久内不用再 @ 也能接话，单位毫秒（0 = 关闭）'),
+    .default(60000)
+    .description('群里被 @ 过一次之后，多久内不用再 @ 也能接话，单位毫秒（0 = 关闭；2026-10-24 按群友的建议从 5 分钟改成 1 分钟）'),
+  groupRepliesPerWindow: Schema.number()
+    .default(0)
+    .description(
+      '一个保活窗口里最多回几次（默认 0 = 不限）。注意：它和「窗口内说话续期」会打架——窗口一直续着、额度却固定，聊几句就哑了。想防连珠炮请用 groupReplyGapMs',
+    ),
+  groupReplyGapMs: Schema.number()
+    .default(20000)
+    .description(
+      '群里两次回复之间至少隔多久，单位毫秒（默认 20000，0 = 不限）。间隔内的消息不丢，攒进 backlog，下一次回复时一起看见 —— 这就是「均匀地回应几次」的实现方式',
+    ),
   replyToPrivate: Schema.boolean()
     .default(true)
     .description('是否响应私聊'),
@@ -78,6 +88,15 @@ export const ConfigSchema = Schema.object({
   groupAllow: Schema.array(Schema.string())
     .default([])
     .description('groupMode=allowlist 时生效的群号列表'),
+
+  // ── 同类机器人（机器人和机器人之间）──
+  // 用户 2026-10-24：「吵架功能单独做个开关，这个开关控制它要不要和同类聊天，以及对比较冲的同类回怼」。
+  botChatEnabled: Schema.boolean()
+    .default(false)
+    .description('群里另一个机器人说话时要不要接（关着 = 同类说啥都不理，连 @ 也不接）'),
+  peerBots: Schema.array(Schema.string())
+    .default([])
+    .description('已知的同类机器人 QQ 号；填了才认得出「这句是别的鱼发的」（NapCat 也带 is_robot 时同样认）'),
   privateMode: Schema.union(['open', 'allowlist', 'disabled'])
     .default('open')
     .description('私聊访问控制：open 全部 / allowlist 仅白名单 / disabled 关闭私聊'),
@@ -128,12 +147,31 @@ export const ConfigSchema = Schema.object({
   rateLimitPerMin: Schema.number()
     .default(12)
     .description('每个会话每分钟最多发几条（0 = 关闭）。QQ 对高频回复很敏感，被限流甚至被封往往不是因为说了什么，而是因为回得太多'),
+  groupMinGapMs: Schema.number()
+    .default(4000)
+    .description('群聊里两条回复之间至少隔多久，单位毫秒（0 = 不限制）。群里连着追问时，隔开一点比一口气说完安全得多'),
   streamReply: Schema.boolean()
     .default(true)
     .description('私聊是否边生成边发（群聊始终整段发）'),
   streamMaxChunks: Schema.number()
     .default(3)
     .description('一个回合里最多流式发几条，超出就攒起来一起发'),
+
+  // ── 上下文管理 ──
+  contextGuard: Schema.boolean()
+    .default(true)
+    .description('上下文守卫：DSH 自动压缩后补回聊天规矩；接近窗口上限时主动换新会话'),
+  contextSwapRatio: Schema.number()
+    .default(0.7)
+    .description(
+      '最近一次请求的 token 数超过窗口的这个比例就主动换新会话（0 = 不主动换，交给 DSH 自己的压缩）；DSH 默认在 0.8 自动压缩',
+    ),
+  contextSwapMinTokens: Schema.number()
+    .default(200000)
+    .description('主动换会话的绝对下限：请求 token 没到这个数就不换，免得小窗口模型刚聊两句就换'),
+  contextMemoryKeep: Schema.number()
+    .default(30)
+    .description('换会话前把最近多少条聊天记进 记忆区/压缩记忆/，给新会话接话用'),
 
   // ── 生命周期 ──
   sessionIdleTimeout: Schema.number()

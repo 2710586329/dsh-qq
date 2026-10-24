@@ -12,9 +12,12 @@
 import { createServer } from 'node:http'
 import { WebSocketServer } from 'ws'
 
-export function startMockNapcat({ port = 3001, token = '', selfId = 10001, selfName = '小满', quiet = false } = {}) {
+export function startMockNapcat({ port = 3001, token = '', selfId = 10001, selfName = '小满', quiet = false, quoted = {} } = {}) {
   const calls = []
   const clients = new Set()
+  // message_id → { userId, nickname, text }：get_msg 要查的「被引用的原消息」。
+  // 2026-10-24 加：dsh-qq 要靠引用判断「这条是不是在回我」，测试得能造出引用。
+  const quoteStore = { ...quoted }
   const log = (...args) => {
     if (!quiet) console.error('[mock-napcat]', ...args)
   }
@@ -46,7 +49,7 @@ export function startMockNapcat({ port = 3001, token = '', selfId = 10001, selfN
       calls.push(payload)
       if (!quiet) log('API ←', payload.action, JSON.stringify(payload.params ?? {}).slice(0, 160))
 
-      const data = respond(payload, { selfId, selfName, calls })
+      const data = respond(payload, { selfId, selfName, calls, quoteStore })
       ws.send(JSON.stringify({ status: 'ok', retcode: 0, echo: payload.echo, data }))
     })
 
@@ -64,6 +67,16 @@ export function startMockNapcat({ port = 3001, token = '', selfId = 10001, selfN
       case 'send_group_msg':
       case 'send_msg':
         return { message_id: Math.floor(Math.random() * 1e6) }
+      case 'get_msg': {
+        const id = String(payload.params?.message_id ?? '')
+        const q = ctx.quoteStore[id]
+        if (!q) return null
+        return {
+          message_id: Number(id),
+          sender: { user_id: q.userId, nickname: q.nickname ?? '某人' },
+          message: q.message ?? [{ type: 'text', data: { text: q.text ?? '' } }],
+        }
+      }
       case 'set_input_status':
       case 'delete_msg':
       case 'set_msg_emoji_like':
@@ -100,7 +113,13 @@ export function startMockNapcat({ port = 3001, token = '', selfId = 10001, selfN
   }
 
   /** 只发一条群消息事件。 */
-  function emitGroupText({ groupId, userId, nickname = '测试用户', text, messageId = 1 }) {
+  function emitGroupText({ groupId, userId, nickname = '测试用户', text, messageId = 1, atSelf = false }) {
+    const message = []
+    // atSelf：先塞一个 @机器人 的段，正文照旧（用来模拟「@ 一下然后说话」）
+    if (atSelf) {
+      message.push({ type: 'at', data: { qq: String(selfId), name: selfName } })
+    }
+    message.push({ type: 'text', data: { text } })
     return emitEvent({
       post_type: 'message',
       message_type: 'group',
@@ -110,7 +129,7 @@ export function startMockNapcat({ port = 3001, token = '', selfId = 10001, selfN
       user_id: userId,
       message_id: messageId,
       raw_message: text,
-      message: [{ type: 'text', data: { text } }],
+      message,
       sender: { user_id: userId, nickname },
     })
   }
@@ -119,6 +138,13 @@ export function startMockNapcat({ port = 3001, token = '', selfId = 10001, selfN
     calls,
     get clientCount() {
       return clients.size
+    },
+    /** 预置一条「被引用的原消息」，供 get_msg 查。 */
+    setQuoted(id, info) {
+      quoteStore[String(id)] = info
+    },
+    clearQuoted(id) {
+      delete quoteStore[String(id)]
     },
     emitEvent,
     emitPrivateText,

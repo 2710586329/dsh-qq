@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict'
 import { startMockNapcat } from './mock-napcat.mjs'
 import { apply, Config } from '../src/index.js'
+import { buildChatPrompt } from '../src/prompts.js'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -34,8 +35,12 @@ function createFakeCtx() {
       const agent = {
         session: { id: sessionId, header: { id: sessionId } },
         received: [],
+        injected: [],
         followup(message) {
           this.received.push(message)
+        },
+        inject(message) {
+          this.injected.push(message)
         },
         async whenIdle() {},
       }
@@ -77,8 +82,12 @@ const config = Config({
   groupMode: 'open',
   privateMode: 'open',
   splitDelayMs: 0,
+  groupMinGapMs: 0, // 间隔由真实部署管，测试里关掉免得每个断言都要等 4 秒
+  groupReplyGapMs: 0, // 同上：均匀间隔单独用一个用例验，别拖慢其他断言
   persona: '你叫小满，是个住在电脑里的助手。',
   ownerIds: ['69099923'],
+  peerBots: ['10002'], // 测试里把「另一只鱼」登记成同类，才测得了「开关关着不接」
+  contextSwapMinTokens: 1000,
 })
 
 apply(ctx, config)
@@ -92,6 +101,11 @@ const privateAgent = created[0]
 assert.match(textOf(privateAgent.received[0]), /在吗在吗/, '私聊正文应该原样进 agent')
 assert.match(textOf(privateAgent.received[0]), /你叫小满/, 'persona 应该拼进首条投递')
 assert.match(textOf(privateAgent.received[0]), /你正在用 QQ 跟人聊天/, '首条应该带内置聊天规矩')
+assert.match(
+  textOf(privateAgent.received[0]),
+  /\[现在是 \d{4}-\d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（(凌晨|早上|上午|中午|下午|傍晚|晚上|深夜)）\]/,
+  '私聊正文应该带一行「现在是 …」的人话时间',
+)
 console.log('✓ 私聊入站 → agent.followup')
 
 // 出站：模拟宿主抛一条 assistant/message
@@ -159,12 +173,43 @@ console.log('✓ @ 之后群聊入站')
 
 const groupAgent = created[1]
 
+// —— 保活期内，@ 别人（另一个机器人）的消息不该接 ——
+// 刚 @ 过它，保活期是开着的；这条 @ 的是 99999，不是在跟我们说话。
+mock.emitEvent({
+  post_type: 'message',
+  message_type: 'group',
+  sub_type: 'normal',
+  self_id: 10001,
+  group_id: 88888,
+  user_id: 1,
+  message_id: 203,
+  raw_message: '[CQ:at,qq=99999] 来帮本鲸测一下',
+  message: [
+    { type: 'at', data: { qq: '99999', name: '另一个机器人' } },
+    { type: 'text', data: { text: ' 来帮本鲸测一下' } },
+  ],
+  sender: { user_id: 1, nickname: '路人' },
+})
+await sleep(300)
+assert.equal(groupAgent.received.length, 1, '@ 的是别人，保活期内也不该投给 agent')
+console.log('✓ 保活期内 @ 别人的消息被挡下')
+
 // 群聊首条带「谁是谁」——配置了 ownerIds 才带
 assert.match(textOf(groupAgent.received[0]), /谁是谁/, '配了 ownerIds 的群聊应该注入认人规矩')
 assert.match(textOf(groupAgent.received[0]), /陌生人/, '认人规矩里应该说明陌生人边界')
+assert.match(
+  textOf(groupAgent.received[0]),
+  /\[\S+ \(\d+\)\S* \d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（(凌晨|早上|上午|中午|下午|傍晚|晚上|深夜)）\]/,
+  '群历史行应该自带星期和时段',
+)
 console.log('✓ 群聊注入认人规矩')
 
-// 主人（69099923）在群里说话 → 群历史行标「· 主人」
+// 群里最容易翻车的两段规矩：认不出「哪句是我说的」、被冲了就开始道歉
+assert.match(textOf(groupAgent.received[0]), /谁是「你」/, '群聊应该注入「谁是你在说」的规矩')
+assert.match(textOf(groupAgent.received[0]), /别的机器人/, '要说明群里可能有别的机器人、它说的不是你')
+assert.match(textOf(groupAgent.received[0]), /【脾气】/, '应该注入脾气规矩（不客气不用客气）')
+
+// 主人在群里说话 → 群历史行标「· 主人」
 mock.emitEvent({
   post_type: 'message',
   message_type: 'group',
@@ -194,6 +239,212 @@ assert.equal(Number(sentGroup.params.group_id), 88888)
 assert.ok(!JSON.stringify(sentGroup.params.message).includes('CQ:at'), '不该把 CQ 码原样发出去')
 console.log('✓ assistant/message → send_group_msg（未泄漏 CQ 码）')
 
+// 自己发出去的话要回写进群历史，并标成「你（昵称）」——
+// 不然它下一轮看不见自己说过什么，会把别人的话认领成自己的。
+mock.emitEvent({
+  post_type: 'message',
+  message_type: 'group',
+  self_id: 10001,
+  group_id: 88888,
+  user_id: 1,
+  message_id: 204,
+  raw_message: '[CQ:at,qq=10001] 再说一遍',
+  message: [
+    { type: 'at', data: { qq: '10001' } },
+    { type: 'text', data: { text: ' 再说一遍' } },
+  ],
+  sender: { user_id: 1, nickname: '路人' },
+})
+await waitFor(() => groupAgent.received.length === 3, { what: '第二轮群聊入站' })
+assert.match(
+  textOf(groupAgent.received[2]),
+  /\[你（[^\）]*） \d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（[^）]*）\] 在的在的/,
+  '自己发过的话应该以「你（昵称）」写进群历史',
+)
+console.log('✓ 自己说的话进历史并标成「你」')
+
+// —— 保活窗是按「人」算的，不是按群 ——
+// QLark 的原话：做成「整个群一个窗口」，群里一热闹它就得每句都插嘴，比每句都要 @ 更糟。
+const beforeOther = groupAgent.received.length
+mock.emitGroupText({ groupId: 88888, userId: 2, nickname: '另一个人', text: '我也说一句', messageId: 301 })
+await sleep(300)
+assert.equal(groupAgent.received.length, beforeOther, '保活窗是按人的，别人说话不能蹭进来')
+console.log('✓ 保活窗按人算：别人说话不蹭')
+
+// 刚才 @ 过它的那个人继续说 → 不用再 @
+mock.emitGroupText({ groupId: 88888, userId: 1, nickname: '路人', text: '那我再问一句', messageId: 302 })
+await waitFor(() => groupAgent.received.length === beforeOther + 1, { what: '保活窗内本人续话' })
+assert.match(textOf(groupAgent.received[beforeOther]), /那我再问一句/)
+console.log('✓ 保活窗内本人不用再 @')
+
+// —— 引用我的消息 = 在叫我（哪怕没 @）——
+mock.setQuoted('400', { userId: 10001, nickname: '小满', text: '我刚才那句话' })
+const beforeQuoteMe = groupAgent.received.length
+mock.emitEvent({
+  post_type: 'message',
+  message_type: 'group',
+  sub_type: 'normal',
+  self_id: 10001,
+  group_id: 88888,
+  user_id: 3,
+  message_id: 303,
+  raw_message: '[CQ:reply,id=400] 你刚才那句什么意思',
+  message: [
+    { type: 'reply', data: { id: '400' } },
+    { type: 'text', data: { text: ' 你刚才那句什么意思' } },
+  ],
+  sender: { user_id: 3, nickname: '引用的人' },
+})
+await waitFor(() => groupAgent.received.length === beforeQuoteMe + 1, { what: '引用我的消息入站' })
+assert.match(textOf(groupAgent.received[beforeQuoteMe]), /引用 我自己/, '引用我的消息应该标成「引用 我自己」')
+console.log('✓ 引用我的消息 = 在叫我（没 @ 也接）')
+
+// —— 引用的是别人 → 不是在叫我，不接 ——
+// 换个人（user 5）来发，免得蹭上 user 3 刚开的保活窗。
+mock.setQuoted('410', { userId: 4, nickname: '别人', text: '别人说的话' })
+const beforeQuoteOther = groupAgent.received.length
+mock.emitEvent({
+  post_type: 'message',
+  message_type: 'group',
+  sub_type: 'normal',
+  self_id: 10001,
+  group_id: 88888,
+  user_id: 5,
+  message_id: 304,
+  raw_message: '[CQ:reply,id=410] 那句啥意思',
+  message: [
+    { type: 'reply', data: { id: '410' } },
+    { type: 'text', data: { text: ' 那句啥意思' } },
+  ],
+  sender: { user_id: 5, nickname: '看热闹的' },
+})
+await sleep(300)
+assert.equal(groupAgent.received.length, beforeQuoteOther, '引用别人不该当成在叫我')
+console.log('✓ 引用别人的消息不接')
+
+// —— [SILENT] 出口：非必回的群消息才给 ——
+assert.doesNotMatch(textOf(groupAgent.received[0]), /\[SILENT\]/, '被 @ 的消息是必回的，不该给潜水出口')
+assert.match(textOf(groupAgent.received[beforeOther]), /\[SILENT\]/, '保活窗里可以自己决定接不接，应该给 [SILENT] 出口')
+console.log('✓ [SILENT] 出口只给非必回的消息')
+
+// 模型真回了 [SILENT] → 一个字节都不发出去
+const beforeSilentSend = mock.calls.filter((c) => c.action === 'send_group_msg').length
+ctx.emit('session/event', groupAgent.session, {
+  type: 'assistant/message',
+  data: { turn: 9, step: 1, message: { content: [{ type: 'text', text: '[SILENT]' }] } },
+})
+await sleep(300)
+assert.equal(
+  mock.calls.filter((c) => c.action === 'send_group_msg').length,
+  beforeSilentSend,
+  '模型输出 [SILENT] 时不应该发出任何消息',
+)
+console.log('✓ 模型回 [SILENT] 就不发')
+
+// —— 同类机器人（群里另一只鱼）：吵架开关关着就完全不接，连 @ 都不接 ——
+assert.equal(config.botChatEnabled, false, '默认应该关着：鱼和鱼之间的帐先不算')
+const beforePeer = groupAgent.received.length
+mock.emitEvent({
+  post_type: 'message',
+  message_type: 'group',
+  sub_type: 'normal',
+  self_id: 10001,
+  group_id: 88888,
+  user_id: 10002,
+  message_id: 305,
+  raw_message: '[CQ:at,qq=10001] 来，你说话呀',
+  message: [
+    { type: 'at', data: { qq: '10001' } },
+    { type: 'text', data: { text: ' 来，你说话呀' } },
+  ],
+  sender: { user_id: 10002, nickname: '同类机器人' },
+})
+await sleep(300)
+assert.equal(groupAgent.received.length, beforePeer, '同类机器人发言，开关关着不该接（@ 也不接）')
+console.log('✓ 同类机器人：开关关着连 @ 都不接')
+
+// 打开开关 → 可以接，并且注入「同类机器人」那段规矩
+config.botChatEnabled = true
+mock.emitEvent({
+  post_type: 'message',
+  message_type: 'group',
+  sub_type: 'normal',
+  self_id: 10001,
+  group_id: 88888,
+  user_id: 10002,
+  message_id: 306,
+  raw_message: '[CQ:at,qq=10001] 来，你说话呀',
+  message: [
+    { type: 'at', data: { qq: '10001' } },
+    { type: 'text', data: { text: ' 来，你说话呀' } },
+  ],
+  sender: { user_id: 10002, nickname: '同类机器人' },
+})
+await waitFor(() => groupAgent.received.length === beforePeer + 1, { what: '同类机器人（开关已开）入站' })
+// 规矩文本本身单独验（会话里 chatPromptInjected 已经注入过一次，中途打开开关不会重注——重启宿主才生效）
+const promptOn = buildChatPrompt({ ...config, botChatEnabled: true }, { isGroup: true })
+const promptOff = buildChatPrompt({ ...config, botChatEnabled: false }, { isGroup: true })
+assert.match(promptOn, /【同类机器人】/, '开关开着应该注入同类规矩')
+assert.match(promptOn, /不替它打圆场/, '要写明不替它打圆场')
+assert.match(promptOn, /先分清是不是在说你/, '要写明「先看是不是在冲自己」')
+assert.doesNotMatch(promptOff, /【同类机器人】/, '开关关着不该注入同类规矩')
+console.log('✓ 同类机器人：开关打开才接，并带上同类规矩')
+
+// 同类发言在群历史里要单独标出来，不然又分不清「这句是谁说的」
+mock.emitGroupText({ groupId: 88888, userId: 10002, nickname: '同类机器人', text: '我在旁边看着', messageId: 307 })
+await waitFor(() => groupAgent.received.length === beforePeer + 2, { what: '同类机器人续话' })
+assert.match(textOf(groupAgent.received[beforePeer + 1]), /· 同类机器人/, '同类发言在历史里应该标「· 同类机器人」')
+console.log('✓ 同类机器人在历史里标「· 同类机器人」')
+
+// —— 没有 @ 就不接，主人也一样（2026-10-24 取消「主人永久免 @」：主人说「只回我确实看着怪」）——
+// 用一个没人 @ 过的新群，免得蹭到前面用例开出来的窗口
+const totalBefore = created.reduce((n, a) => n + a.received.length, 0)
+mock.emitGroupText({ groupId: 88891, userId: 69099923, nickname: '主人', text: '我随便说一句', messageId: 308 })
+await sleep(500)
+const totalAfter = created.reduce((n, a) => n + a.received.length, 0)
+assert.equal(totalAfter, totalBefore, '没 @ 也没在保活期，主人说话也不该投递')
+console.log('✓ 没 @ 就不接，主人也不例外')
+
+// —— 均匀回应：两条回复至少隔一段，间隔里的消息攒起来下次一起看见 ——
+// （主人 2026-10-24：「每窗口最多回 N 次」跟毛糙蛋的「发消息刷新保活」打架，换成间隔来做「均匀」）
+config.groupReplyGapMs = 1500
+config.groupRepliesPerWindow = 0
+mock.emitGroupText({ groupId: 88890, userId: 777, nickname: '路人甲', text: '@机器人 开始', messageId: 501, atSelf: true })
+await waitFor(
+  () => created.some((a) => a.received.some((m) => textOf(m).includes('开始'))),
+  { what: '开窗' },
+)
+const agent3 = created.find((a) => a.received.some((m) => textOf(m).includes('开始')))
+const afterFirst = agent3.received.length
+mock.emitGroupText({ groupId: 88890, userId: 777, nickname: '路人甲', text: '紧跟着一句', messageId: 502 })
+await sleep(400)
+assert.equal(agent3.received.length, afterFirst, '间隔内的消息不应该立刻投递')
+await sleep(1300)
+mock.emitGroupText({ groupId: 88890, userId: 777, nickname: '路人甲', text: '过一会儿再说', messageId: 503 })
+await waitFor(() => agent3.received.length === afterFirst + 1, { what: '间隔够了再回' })
+const batched = textOf(agent3.received[afterFirst])
+assert.match(batched, /过一会儿再说/, '间隔到了应该回最新这句')
+assert.match(batched, /紧跟着一句/, '间隔里攒下的那句也要补进上下文，不能丢')
+config.groupReplyGapMs = 0
+console.log('✓ 均匀回应：间隔内的消息攒起来，下次一起看见')
+
+// —— 跳过的群消息也要进上下文（2026-10-24 群里实测踩的坑）——
+// 廖方说「天意的大手发力了」没 @ 我们 → 跳过；两分钟后主人接一句「确实天意的大手」，
+// 它却回「天意也是主人的手呀」—— 因为它压根没看见前面那句，只能顺着主人的话编。
+// 跳过归跳过（不叫醒它），但话得让它看得见。
+mock.emitGroupText({ groupId: 88889, userId: 867107431, nickname: '廖方', text: '天意的大手发力了', messageId: 401 })
+await sleep(300)
+mock.emitGroupText({ groupId: 88889, userId: 867107431, nickname: '廖方', text: '@机器人 这啥意思', messageId: 402, atSelf: true })
+await waitFor(
+  () => created.some((a) => a.received.some((m) => textOf(m).includes('这啥意思'))),
+  { what: '被跳过的群消息补进上下文' },
+)
+const backlogged = created
+  .flatMap((a) => a.received.map((m) => textOf(m)))
+  .find((t) => t.includes('这啥意思'))
+assert.match(backlogged, /天意的大手发力了/, '前面被跳过的消息应该补进上下文，不然它接话只能瞎猜')
+console.log('✓ 跳过的群消息会补进上下文（接话不再瞎猜）')
+
 // —— 长文本切块 ——
 const longText = '这是一段用来测试切块的长文字。'.repeat(80)
 ctx.emit('session/event', groupAgent.session, {
@@ -222,6 +473,42 @@ assert.equal(created2.length, 0, '白名单外的私聊应该被拦下')
 mock.emitPrivateText({ userId: 69099923, nickname: '朋友', text: '是我', messageId: 302 })
 await waitFor(() => created2.length === 1, { what: '白名单内私聊放行' })
 console.log('✓ 私聊白名单：陌生人拦下、自己人放行')
+
+// —— 上下文守卫：压缩后补回聊天规矩 ——
+ctx.emit('session/event', privateAgent.session, { type: 'compaction/end', data: {} })
+await sleep(100)
+assert.equal(privateAgent.injected.length, 1, '压缩后应该 inject 一张记忆卡')
+mock.emitPrivateText({ userId: 69099923, nickname: '朋友', text: '刚才说到哪了', messageId: 401 })
+// 白名单那段也走同一个 mock，私聊会话此时已经收到第 3 条（「是我」）
+await waitFor(() => privateAgent.received.length === 4, { what: '压缩后的私聊' })
+assert.match(textOf(privateAgent.received[3]), /你正在用 QQ 跟人聊天/, '压缩后应该重新注入聊天规矩')
+console.log('✓ 压缩后重注入聊天规矩 + 记忆卡')
+
+// —— 上下文守卫：压力超过阈值主动换会话 ——
+ctx.emit('session/event', privateAgent.session, {
+  type: 'request/context',
+  data: { provider: 'deepseek-account', model: 'deepseek-flash', contextWindow: 10000 },
+})
+ctx.emit('session/event', privateAgent.session, {
+  type: 'assistant/message',
+  data: {
+    turn: 1,
+    step: 1,
+    message: { content: [{ type: 'text', text: '嗯' }] },
+    usage: { inputTokens: 5000, outputTokens: 10, cacheReadTokens: 4000, cacheWriteTokens: 0, totalTokens: 9010 },
+  },
+})
+mock.emitPrivateText({ userId: 69099923, nickname: '朋友', text: '聊点别的', messageId: 411 })
+// 前面白名单那段的「陌生人」消息也会进这个 open 实例，created 里可能多出别的会话，
+// 所以按内容找，不按序号找
+const gotIt = (agent) => agent.received.some((m) => textOf(m).includes('聊点别的'))
+await waitFor(() => created.some(gotIt), { what: '压力超限换新会话' })
+const swapped = created.find(gotIt)
+const swappedText = textOf(swapped.received[0])
+assert.match(swappedText, /聊点别的/)
+assert.match(swappedText, /你正在用 QQ 跟人聊天/, '新会话应该重新注入聊天规矩')
+assert.match(swappedText, /上一段聊天/, '新会话应该带上上一段聊天的尾巴')
+console.log('✓ 压力超限自动换新会话（带 seed 接话）')
 
 await mock.close()
 console.log('\n全部通过 🎉')

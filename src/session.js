@@ -149,6 +149,8 @@ export class SessionManager {
       busy: 0,
       queue: Promise.resolve(),
       history: [],
+      recent: [],
+      swapSeed: null,
       chatPromptInjected: false,
     }
     this.#records.set(sessionId, record)

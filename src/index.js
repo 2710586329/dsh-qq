@@ -4,8 +4,10 @@ import { ConfigSchema } from './config.js'
 import { OneBotClient } from './onebot/client.js'
 import { textSegments } from './onebot/segment.js'
 import { SessionManager } from './session.js'
-import { createInbound } from './inbound.js'
+import { createInbound, historyLine, pushHistory } from './inbound.js'
+import { SILENT_MARKER } from './prompts.js'
 import { createOutbound } from './outbound.js'
+import { createContextGuard } from './context-guard.js'
 import { splitText, sleep } from './shared/chunk.js'
 import { registerTools } from './tools.js'
 import { ApprovalChannel } from './approval.js'
@@ -93,13 +95,34 @@ export function apply(ctx, config) {
     return true
   }
 
+  const lastSentAt = new Map() // 群聊里上一条发出去的毫秒时间，用来拉开间隔
+
   async function send(record, text) {
+    // 「这次不接话」：模型只输出 [SILENT] 就当作它选择潜水 —— 不发、不进历史、不报错。
+    // 出口只在「这条不一定是在叫它」时给（见 inbound.js 的 mustReply），
+    // 被 @、被引用、私聊都不会走到这里。
+    const trimmed = String(text ?? '').trim()
+    if (trimmed === SILENT_MARKER) {
+      logger.info(`[dsh-qq] ${record.label} 选择不接话（${SILENT_MARKER}）`)
+      return
+    }
     const chunks = splitText(text, config.textChunkLimit)
     if (chunks.length === 0) return
     const isGroup = record.scope === 'group'
     const action = isGroup ? 'send_group_msg' : 'send_private_msg'
     const target = isGroup ? { group_id: Number(record.peerId) } : { user_id: Number(record.peerId) }
     const rateKey = `${record.scope}:${record.peerId}`
+    let sentAny = false
+
+    // 群聊：两条回复之间拉开一点。一群人追着问的时候，
+    // 连着往外吐最容易被人当成刷屏，也最容易被风控。
+    const gapMs = record.scope === 'group' ? Math.max(0, Number(config.groupMinGapMs) || 0) : 0
+    if (gapMs > 0) {
+      const last = lastSentAt.get(rateKey) ?? 0
+      const wait = last + gapMs - Date.now()
+      if (wait > 0 && wait <= 30000) await sleep(wait)
+    }
+    lastSentAt.set(rateKey, Date.now())
 
     for (let index = 0; index < chunks.length; index += 1) {
       // 限流优先于一切：宁可不回，也不要在被围攻时跟着刷屏
@@ -112,12 +135,25 @@ export function apply(ctx, config) {
         // 记下自己发的消息 id，撤回工具要用
         const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
         if (sentId > 0) record.lastSentMessageId = sentId
+        sentAny = true
         logger.info(`→ ${record.label}: ${chunks[index].slice(0, 60)}`)
       } catch (err) {
         logger.warn(`发送到 ${record.label} 失败:`, err?.message ?? err)
         break
       }
       if (index < chunks.length - 1) await sleep(config.splitDelayMs)
+    }
+
+    // 自己发出去的话也要进历史：不然下一轮它看不见「我说过什么」，
+    // 群里口吻相近的别的机器人一开口，就会当成自己说的去道歉、去撤回。
+    const said = trimmed
+    if (sentAny && said) {
+      const selfName = manager.selfName || '机器人'
+      const entry = historyLine(null, said, { isSelf: true, selfName })
+      pushHistory(record, entry, config.historyLimit)
+      record.recent.push(entry)
+      const recentKeep = Math.max(80, (Number(config.contextMemoryKeep) || 30) * 3)
+      if (record.recent.length > recentKeep) record.recent.splice(0, record.recent.length - recentKeep)
     }
 
     // 发完了，取消「正在输入」
@@ -132,10 +168,12 @@ export function apply(ctx, config) {
   const questions = new QuestionChannel({ manager, config, logger, send })
   questions.install(ctx)
 
-  const inbound = createInbound({ config, manager, logger, client, send, approval, questions })
+  const contextGuard = createContextGuard({ manager, config, logger })
+  const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard })
   const outbound = createOutbound({ manager, config, logger, send })
 
   const offSessionEvent = ctx.on('session/event', outbound)
+  const offGuardEvent = ctx.on('session/event', contextGuard.onSessionEvent)
 
   client.on('event', (event) => {
     inbound(event).catch((err) => logger.warn('处理入站消息失败:', err?.message ?? err))
@@ -143,13 +181,17 @@ export function apply(ctx, config) {
 
   client.on('open', async () => {
     logger.info(`已连接 ${config.wsUrl}`)
-    if (selfId) return
     try {
+      // 就算配置里写死了 selfId，也要问一次昵称：历史行里「你（昵称）」得写对，
+      // 不然它认不出哪个是自己发的。
       const info = await client.call('get_login_info', {}, 10_000)
       if (info?.user_id) {
-        selfId = String(info.user_id)
-        manager.selfId = selfId
-        logger.info(`登录账号 ${info.nickname ?? ''} (${selfId})`)
+        if (!selfId) {
+          selfId = String(info.user_id)
+          manager.selfId = selfId
+        }
+        if (info.nickname) manager.selfName = String(info.nickname)
+        logger.info(`登录账号 ${info.nickname ?? ''} (${info.user_id})`)
       }
     } catch (err) {
       logger.warn('获取登录账号失败，请手动填 selfId:', err?.message ?? err)
@@ -166,6 +208,7 @@ export function apply(ctx, config) {
   ctx.on('dispose', () => {
     try {
       offSessionEvent?.()
+      offGuardEvent?.()
     } catch {
       /* ignore */
     }
