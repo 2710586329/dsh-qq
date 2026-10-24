@@ -6,15 +6,16 @@
 
 ### 新增
 
-- 	ools/ 补齐部署脚本（全部不带本机路径，靠 qqbot.config.ps1 覆盖）：
+- tools/ 补齐部署脚本（全部不带本机路径，靠 qqbot.config.ps1 覆盖）：
   - start-bot / stop-bot —— 起停 NapCat + qqbot 宿主。起之前先掐旧宿主（防两个宿主抢连接、同一句话回两遍）；停的时候按可执行文件路径过滤，不误杀桌面上的 QQ。
   - watchdog —— 每 30 秒巡检三样：端口在听、宿主在、端口上有 Established 连接（第三样最容易漏，进程活着连接断了就是假活）；掉了自动拉起，每 15 分钟备份会话数据、留最近 24 份。
   - diary + diary-prompt.md —— 把当天聊天流水交给 --profile headless 的一次性会话写成日记。
-- 	ools/qqbot.config.example.ps1 —— 想改路径/端口/频率就复制成 qqbot.config.ps1。
+- tools/qqbot.config.example.ps1 —— 想改路径/端口/频率就复制成 qqbot.config.ps1。
 
 ### 文档
 
-- README 加「部署脚本」一节；	ools/README.md 写了装法、自启、计划任务和五条踩坑。
+- README 加「部署脚本」一节；tools/README.md 写了装法、自启、计划任务和五条踩坑。
+
 ## [0.7.0] - 2026-10-24
 ### 新增
 - **聊天流水**：收到的每条消息、它自己说的每句话，都按时落盘到会话目录的 `聊天记录/<日期>.md`，一行一条：`- 14:05:09 · 昵称(QQ号)：说了什么`。

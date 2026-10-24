@@ -1,0 +1,100 @@
+# 配置项速查
+
+全部配置都写在 profile 的 `cordis.patch.yml` 里 `dsh-qq` 那一行的 `config:` 下面；也可以用 DSH 设置页里「QQ」那节点着改（详见 [README](../README.md#在-dsh-设置里调它)）。
+
+> 一行 patch 是**整行替换、不是深合并**：后写的 `config` 会把前面的整块盖掉，所以改的时候把要保留的键一起写全。
+
+## 连接
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| `wsUrl` | `ws://127.0.0.1:3001` | NapCat 的 WebSocket 服务端地址 |
+| `accessToken` | 空 | NapCat 那边设的 Token，留空就不带鉴权头 |
+| `selfId` | 空 | 机器人 QQ 号。留空会自动 `get_login_info` 查 |
+| `reconnectMs` | `5000` | 断线重连间隔（毫秒） |
+
+## 会话与工作区
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| `provider` / `model` / `preset` | 空 | 指定模型与预设；留空跟随宿主当前设置 |
+| `cwd` | 空 | Agent 工作目录 |
+| `workspaceRoot` | 空 | 每个 QQ 会话的独立工作目录放在哪；留空用 `<cwd>/会话` |
+| `isolateByPeer` | `true` | 每个私聊 / 每个群各自一个工作目录 + 记忆区，互不可见 |
+| `sessionIdleTimeout` | `1800000` | 会话闲置多久回收（毫秒） |
+
+## 群里怎么说话
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| `requireMention` | `true` | 群聊必须 @ 才理 |
+| `groupWakeMs` | `60000` | 被某人 @ 过一次后，多久内不用再 @ 也能接话（毫秒，0 = 关闭）。窗口按「群 + 人」算，别人蹭不到 |
+| `groupReplyGapMs` | `20000` | 同一个「群 + 人」两次回复之间至少隔多久（毫秒）：均匀地回，间隔里的消息攒着下次一起看 |
+| `groupRepliesPerWindow` | `0` | 一个保活窗口内最多回几次（0 = 不限）。它和「窗口内说话续期」会打架，一般别开 |
+| `groupMinGapMs` | `4000` | 群聊任意两条回复之间的最小间隔（毫秒），防风控 |
+| `historyLimit` | `20` | 群聊带多少条最近消息当上下文 |
+| `quoteReply` | `true` | 消息带引用时，把「被引用的人 + 原文」一起交给 Agent |
+
+## 谁能跟它说话
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| `groupMode` | `open` | `open` / `allowlist` / `disabled` |
+| `groupAllow` | `[]` | `allowlist` 模式下允许的群号 |
+| `privateMode` | `open` | `open` / `allowlist` / `disabled` |
+| `privateAllow` | `[]` | `allowlist` 模式下允许的 QQ 号 |
+| `replyToPrivate` | `true` | 私聊总开关 |
+| `ownerIds` | `[]` | 主人的 QQ 号（可多个）；群聊里这些人会被标出来，其他群友当陌生人 |
+| `ownerLabel` | `主人` | 群聊里怎么称呼这位主人，例如「老板」 |
+
+## 同类机器人
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| `botChatEnabled` | `false` | 群里另一个机器人发言时要不要接；关着 = 同类说啥都不理，连 @ 也不接 |
+| `peerBots` | `[]` | 已知同类机器人的 QQ 号；群历史里会给它们标「· 同类机器人」 |
+
+## 图片 · 语音 · 表情包
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| `imageCacheDir` | 空 | 收到的图片下载到哪；留空用 `<cwd>/图片缓存` |
+| `imageMaxMB` | `8` | 单张图片体积上限 |
+| `faceCollectHint` | 空 | 什么样的图值得收进表情包收藏；留空 = 一张都不收 |
+| `asrEnabled` | `true` | 语音自动转文字（本地 vosk，离线） |
+| `asrPython` | `python` | 跑 ASR 脚本的 python（默认要求它在 PATH 里） |
+| `asrScript` | 空 | ASR 脚本路径；留空用插件自带的 `tools/asr.py` |
+| `asrModel` | 空 | vosk 模型目录（纯 ASCII 路径）；留空按 `VOSK_MODEL` → 插件旁 `models/` 找 |
+| `asrTimeoutMs` | `60000` | 单条语音转写超时 |
+
+## 发消息的节奏
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| `textChunkLimit` | `1500` | 单条消息最长多少字，超了自动切 |
+| `splitDelayMs` | `400` | 分段发送之间的间隔，别设 0 太急 |
+| `rateLimitPerMin` | `12` | 每个会话每分钟最多发几条（0 = 关闭） |
+| `streamReply` | `true` | 私聊是否边生成边发（群聊始终整段发） |
+| `streamMaxChunks` | `3` | 一轮里最多流式发几条 |
+| `maxTurnMs` | `600000` | 单轮最长等待时间，超时只提示不打断 |
+| `showToolResults` | `false` | 要不要把工具调用过程也发到 QQ 里 |
+
+## 上下文 · 人设 · 记忆
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| `contextGuard` | `true` | 上下文守卫：压缩后补回聊天规矩；接近窗口上限时换新会话 |
+| `contextSwapRatio` | `0.7` | 最近一次请求的 token 超过窗口这个比例就换会话（0 = 不换，交给 DSH 自动压缩） |
+| `contextSwapMinTokens` | `200000` | 换会话的绝对下限：请求 token 不到这个数就不换 |
+| `contextMemoryKeep` | `30` | 换会话前把最近多少条聊天记进 `记忆区/压缩记忆/` |
+| `chatLog` | `true` | 把每天的收发追加进 `<会话目录>/聊天记录/<日期>.md`（原始流水，不是日记） |
+| `persona` | 空 | 它是谁：名字、性格、怎么称呼人（见 [让它有性格](persona.md)） |
+| `directPrompt` | 空 | 私聊时加在聊天规矩后面的补充指令 |
+| `groupPrompt` | 空 | 群聊时的补充指令（比如「在群里说话，一两句就好」） |
+| `debug` | `false` | 打开细节日志 |
+
+## `chatLog` 为什么值得开着
+
+QQ 会话是「一问一答」的，模型很少会主动写日记，聊完就忘——第二天问它「昨天说的那个」，它根本不知道。流水由插件来记，不依赖模型自觉，也不多花一轮 token；被跳过的群消息也记，方便回查「它当时到底看到了什么、为什么接不上话」。
+
+要注意这是**原始流水，不是日记**。要日记还得让 Agent 自己（或者定时任务）从流水里提炼，见 [让它自己长期跑](deployment.md)。写失败只记调试日志，绝不影响聊天。
