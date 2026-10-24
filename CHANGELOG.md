@@ -2,6 +2,16 @@
 
 本文件记录 dsh-qq 的版本变更。格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号照 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.7.2] - 2026-10-24
+
+### 文档
+
+- **修正装插件的命令。** 原来的写法 `npx @deepseek-ai/dsh plugin --profile desktop add …` 根本跑不通：`desktop` 这份 profile 由桌面端独占管理，npx 版 CLI 会直接报 `profile "desktop" is managed exclusively by the Electron application`；它还依赖你自己装好的 pnpm。改成用 DSH 自带的 `dsh`，并写清三件事——`--profile` 必填、装完进的是 `package.json` 的 `dsh.profile.bundles`（不是往 `cordis.patch.yml` 加一行）、装之前 DSH 要完全退出。
+- 第 3 步从「手改 YAML」改成「设置 → QQ 面板填」，YAML 只作备选。
+- README 从 466 行压到 190 行：人设/配置/部署/开发四块拆进 `docs/`，正文只留主干和 FAQ。
+- `TESTING.md` 的安装命令同步修正；包内现在带 `docs/`。
+- 修 `CHANGELOG.md` 里 3 处被写成制表符的 `- tools/`。
+
 ## [0.7.1] - 2026-10-24
 
 ### 新增
