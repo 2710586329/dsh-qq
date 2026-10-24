@@ -76,7 +76,7 @@ npx @deepseek-ai/dsh plugin --profile desktop add "D:/path/to/dsh-qq"
 
 ```bash
 pnpm pack                      # 得到 dsh-qq-0.3.0.tgz
-npx @deepseek-ai/dsh plugin add ./dsh-qq-0.4.0.tgz
+npx @deepseek-ai/dsh plugin add ./dsh-qq-0.5.0.tgz
 ```
 
 装完在 `$DSH_HOME/profiles/<你的 profile>/cordis.patch.yml` 里能看到一行 `dsh-qq`。
