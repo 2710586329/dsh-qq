@@ -14,8 +14,14 @@ node_modules/
 # 日志与临时文件
 *.log
 npm-debug.log*
+dsh-qq-debug.log
 .DS_Store
 Thumbs.db
+
+# 运行时产物（会话工作目录、图片缓存、表情包收藏、调试日志）
+会话/
+图片缓存/
+表情包收藏.json
 
 # 本地调试脚本（一次性验证用，不进仓库）
 test/tmp-*.mjs

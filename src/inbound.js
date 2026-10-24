@@ -1,19 +1,25 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { readMessage } from './onebot/segment.js'
 import { rememberFaces, facesCount } from './faces.js'
+import { buildChatPrompt, faceCollectRule, IMAGE_RULES } from './prompts.js'
 import { mkdir, writeFile, readdir, unlink } from 'node:fs/promises'
 import { join, extname } from 'node:path'
 import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+
+/** 插件自带的 ASR 脚本；配置里没写 asrScript 时用它。 */
+const DEFAULT_ASR_SCRIPT = fileURLToPath(new URL('../tools/asr.py', import.meta.url))
 
 /**
- * 跑一次离线 ASR：python asr.py <wav> → {ok, text}
+ * 跑一次离线 ASR：python asr.py <wav> [model] → {ok, text}
  * 任何异常都吞掉返回空串，绝不让语音把主链路拖死。
  */
 function runAsr(config, wavPath) {
   return new Promise((resolve) => {
     const py = config.asrPython || 'python'
-    const script = config.asrScript || ''
+    const script = config.asrScript || DEFAULT_ASR_SCRIPT
     if (!script) return resolve('')
+    const model = String(config.asrModel ?? '').trim()
     let out = ''
     let done = false
     const finish = (value) => {
@@ -23,7 +29,7 @@ function runAsr(config, wavPath) {
     }
     let child
     try {
-      child = spawn(py, [script, wavPath], { windowsHide: true })
+      child = spawn(py, model ? [script, wavPath, model] : [script, wavPath], { windowsHide: true })
     } catch {
       return resolve('')
     }
@@ -101,12 +107,14 @@ function refreshWake(config, groupId) {
   }
 }
 
-/** 群聊里把一条消息压成一行，进历史缓冲。带时间 —— 模型才知道「隔了两小时才回」。 */
-function historyLine(sender, text) {
+/** 群聊里把一条消息压成一行，进历史缓冲。带时间 —— 模型才知道「隔了两小时才回」。
+ *  sender 在 ownerIds 里时额外标上主人称呼，Agent 才分得清自己人和群友。 */
+function historyLine(sender, text, { isOwner = false, ownerLabel = '主人' } = {}) {
   const name = sender?.card || sender?.nickname || String(sender?.user_id ?? '')
   const d = new Date()
   const time = `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-  return `[${name} (${sender?.user_id ?? ''}) ${time}] ${text}`
+  const tag = isOwner ? ` · ${ownerLabel}` : ''
+  return `[${name} (${sender?.user_id ?? ''})${tag} ${time}] ${text}`
 }
 
 const EXT_BY_MIME = {
@@ -193,6 +201,9 @@ export function createInbound({ config, manager, logger, client, send, approval,
     String(config.imageCacheDir ?? '').trim() ||
     join(String(config.cwd ?? '').trim() || process.cwd(), '图片缓存')
   const maxMB = Number(config.imageMaxMB) || 8
+  // 谁是主人：群聊里用 QQ 号打标，私聊不影响（私聊本来就在白名单里）
+  const ownerIds = new Set((Array.isArray(config.ownerIds) ? config.ownerIds : []).map(String))
+  const ownerLabel = String(config.ownerLabel ?? '').trim() || '主人'
 
   return async function onEvent(event) {
     if (event?.post_type !== 'message') return
@@ -206,6 +217,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const sender = event.sender ?? {}
     const senderName = sender.card || sender.nickname || peerId
     const label = isGroup ? `群 ${peerId}` : `私聊 ${senderName}(${peerId})`
+    const ownerInfo = { isOwner: ownerIds.has(String(event.user_id ?? '')), ownerLabel }
 
     if (isGroup ? !allowGroup(config, peerId) : !allowPrivate(config, peerId)) {
       logger.debug?.(`[dsh-qq] 忽略未授权 ${label}`)
@@ -255,7 +267,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     if (cmd === '/reset' || cmd === '#reset' || cmd === '/new' || cmd === '#new') {
       const ok = manager.reset(record)
       logger.info?.(`[dsh-qq] 收到 /reset（${label}），reset=${ok}`)
-      await send(record, '好，之前聊的我不记得了。重新来过吧，主人。')
+      await send(record, '好，之前聊的我不记得了。重新来过吧。')
       return
     }
     if (cmd === '/status' || cmd === '#status') {
@@ -383,15 +395,19 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // ── 组装交给 agent 的那段文字 ──
     const parts = []
     if (quoteLine) parts.push(quoteLine)
-    const head = isGroup ? historyLine(sender, info.text || '[图片]') : (info.text || '')
+    let head = info.text || ''
+    if (isGroup) head = historyLine(sender, info.text || '[图片]', ownerInfo)
+    else if (ownerInfo.isOwner && head) head = `[${ownerLabel}] ${head}`
     if (head) parts.push(head)
 
     if (imagePaths.length > 0) {
       parts.push(
         `[用户发了 ${imagePaths.length} 张图片，已存到本机，可以直接用 read_image 打开：]`,
         ...imagePaths.map((p) => `  ${p}`),
-        '[图片规矩：先看清楚是什么再说话。只有「鲸鱼娘 / AI 娘化」这类表情包才值得收藏——觉得以后还想发，就用 qq_keep_face 收进收藏；照片、截图、风景、别人随手发的图一律不收，也不要去描述图里画了什么。]',
+        IMAGE_RULES,
       )
+      const hint = faceCollectRule(config)
+      if (hint) parts.push(hint)
     } else if (info.images.length > 0) {
       parts.push('[用户发了图片，但没能下载下来]')
     }
@@ -424,8 +440,13 @@ export function createInbound({ config, manager, logger, client, send, approval,
       )
     }
 
-    const extra = isGroup ? config.groupPrompt : config.directPrompt
-    if (extra) parts.unshift(extra, '')
+    // 聊天规矩（内置中性版 + 可选 persona + directPrompt/groupPrompt）只在本会话第一次投递时
+    // 注入一次，别每条都重复占 token；会话被回收或 /reset 后会重新注入一遍。
+    if (!record.chatPromptInjected) {
+      const chatPrompt = buildChatPrompt(config, { isGroup, isOwner: ownerInfo.isOwner })
+      if (chatPrompt) parts.unshift(chatPrompt, '')
+      record.chatPromptInjected = true
+    }
 
     const body = parts.join('\n')
     const message = createUserMessage({
@@ -437,7 +458,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
     // 先记历史（下一条能看到这一条），再投递
     if (isGroup) {
-      record.history.push(historyLine(sender, info.text || '[图片]'))
+      record.history.push(historyLine(sender, info.text || '[图片]', ownerInfo))
       const keep = Math.max(0, Number(config.historyLimit) || 0) * 2
       if (keep > 0 && record.history.length > keep) {
         record.history.splice(0, record.history.length - keep)
@@ -450,7 +471,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     manager.enqueue(record, async () => {
       let timer = null
       try {
-        // 私聊回一句「正在输入」，让她知道助手在敲字（群聊没有这个概念，跳过）
+        // 私聊回一句「正在输入」，让对方知道这边在敲字（群聊没有这个概念，跳过）
         if (!isGroup && client) {
           client.call('set_input_status', { user_id: Number(peerId), event_type: 1 }, 5000).catch(() => {})
         }

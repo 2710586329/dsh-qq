@@ -66,7 +66,7 @@ function textOf(message) {
 const PORT = 34567
 const TOKEN = 'test-token-123'
 
-const mock = await startMockNapcat({ port: PORT, token: TOKEN, selfId: 10001, selfName: '助手', quiet: true })
+const mock = await startMockNapcat({ port: PORT, token: TOKEN, selfId: 10001, selfName: '小满', quiet: true })
 await mock.start()
 
 const { ctx, created } = createFakeCtx()
@@ -77,6 +77,8 @@ const config = Config({
   groupMode: 'open',
   privateMode: 'open',
   splitDelayMs: 0,
+  persona: '你叫小满，是个住在电脑里的助手。',
+  ownerIds: ['69099923'],
 })
 
 apply(ctx, config)
@@ -84,10 +86,12 @@ await waitFor(() => mock.clientCount === 1, { what: '插件连上假 NapCat' })
 console.log('✓ 连接与鉴权通过')
 
 // —— 私聊 ——
-mock.emitPrivateText({ userId: 69099923, nickname: '主人', text: '在吗在吗', messageId: 101 })
+mock.emitPrivateText({ userId: 69099923, nickname: '朋友', text: '在吗在吗', messageId: 101 })
 await waitFor(() => created.length === 1 && created[0].received.length === 1, { what: '私聊入站' })
 const privateAgent = created[0]
 assert.match(textOf(privateAgent.received[0]), /在吗在吗/, '私聊正文应该原样进 agent')
+assert.match(textOf(privateAgent.received[0]), /你叫小满/, 'persona 应该拼进首条投递')
+assert.match(textOf(privateAgent.received[0]), /你正在用 QQ 跟人聊天/, '首条应该带内置聊天规矩')
 console.log('✓ 私聊入站 → agent.followup')
 
 // 出站：模拟宿主抛一条 assistant/message
@@ -115,6 +119,20 @@ assert.equal(
 )
 console.log('✓ 重复消息去重')
 
+// 聊天规矩 / persona 只在会话首条注入一次，第二条不该重复
+mock.emitPrivateText({ userId: 69099923, nickname: '朋友', text: '再问一句', messageId: 111 })
+await waitFor(() => privateAgent.received.length === 2, { what: '第二条私聊' })
+assert.match(textOf(privateAgent.received[1]), /再问一句/)
+assert.doesNotMatch(textOf(privateAgent.received[1]), /你正在用 QQ 跟人聊天/, '聊天规矩不应每条重复注入')
+assert.doesNotMatch(textOf(privateAgent.received[1]), /你叫小满/, 'persona 不应每条重复注入')
+console.log('✓ 聊天规矩只注入一次')
+
+// 私聊里对面就是主人：注入私聊版认人规矩，正文带 [主人] 标记；群聊版不串进来
+assert.match(textOf(privateAgent.received[0]), /对面这位是你的/, '私聊主人应该注入私聊版认人规矩')
+assert.doesNotMatch(textOf(privateAgent.received[0]), /群里标了/, '私聊不该注入群聊版认人规矩')
+assert.match(textOf(privateAgent.received[0]), /\[主人\] 在吗在吗/, '私聊正文应该带主人标记')
+console.log('✓ 私聊保底：主人标记 + 私聊版认人规矩')
+
 // —— 群聊：没 @ 不该触发 ——
 mock.emitGroupText({ groupId: 88888, userId: 1, nickname: '路人', text: '今天吃什么', messageId: 201 })
 await sleep(300)
@@ -140,6 +158,32 @@ await waitFor(() => created.length === 2 && created[1].received.length === 1, { 
 console.log('✓ @ 之后群聊入站')
 
 const groupAgent = created[1]
+
+// 群聊首条带「谁是谁」——配置了 ownerIds 才带
+assert.match(textOf(groupAgent.received[0]), /谁是谁/, '配了 ownerIds 的群聊应该注入认人规矩')
+assert.match(textOf(groupAgent.received[0]), /陌生人/, '认人规矩里应该说明陌生人边界')
+console.log('✓ 群聊注入认人规矩')
+
+// 主人（69099923）在群里说话 → 群历史行标「· 主人」
+mock.emitEvent({
+  post_type: 'message',
+  message_type: 'group',
+  self_id: 10001,
+  group_id: 88888,
+  user_id: 69099923,
+  message_id: 203,
+  raw_message: '[CQ:at,qq=10001] 我回来了',
+  message: [
+    { type: 'at', data: { qq: '10001' } },
+    { type: 'text', data: { text: ' 我回来了' } },
+  ],
+  sender: { user_id: 69099923, nickname: '主人' },
+})
+await waitFor(() => groupAgent.received.length === 2, { what: '主人群聊入站' })
+assert.match(textOf(groupAgent.received[1]), /· 主人/, '主人发言应该在群历史里被标出来')
+assert.match(textOf(groupAgent.received[0]), /\(1\)/, '群友发言不该被标成主人')
+console.log('✓ 群里认主人：主人打标、群友保持陌生人')
+
 ctx.emit('session/event', groupAgent.session, {
   type: 'assistant/message',
   data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '在的在的' }] } },
@@ -175,9 +219,9 @@ await waitFor(() => mock.clientCount === 2, { what: '第二个实例连上' })
 mock.emitPrivateText({ userId: 42, nickname: '陌生人', text: '你好', messageId: 301 })
 await sleep(300)
 assert.equal(created2.length, 0, '白名单外的私聊应该被拦下')
-mock.emitPrivateText({ userId: 69099923, nickname: '主人', text: '是我', messageId: 302 })
+mock.emitPrivateText({ userId: 69099923, nickname: '朋友', text: '是我', messageId: 302 })
 await waitFor(() => created2.length === 1, { what: '白名单内私聊放行' })
-console.log('✓ 私聊白名单：陌生人拦下、主人放行')
+console.log('✓ 私聊白名单：陌生人拦下、自己人放行')
 
 await mock.close()
 console.log('\n全部通过 🎉')

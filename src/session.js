@@ -149,6 +149,7 @@ export class SessionManager {
       busy: 0,
       queue: Promise.resolve(),
       history: [],
+      chatPromptInjected: false,
     }
     this.#records.set(sessionId, record)
     this.#byPeer.set(key, sessionId)

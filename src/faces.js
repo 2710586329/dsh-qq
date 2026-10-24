@@ -3,14 +3,14 @@
  *
  * 两种条目：
  *  - `mface`：QQ 商城表情，靠 `emoji_id` + `emoji_package_id` 这一对身份证重发
- *  - `image`：一张本地图片（主人扔过来的表情包），靠文件路径重发
+ *  - `image`：一张本地图片（别人发过来、觉得以后想用的表情包），靠文件路径重发
  *
  * 为什么需要它：发商城表情必须同时给出 id，而 Agent 手上没有这份清单 ——
  * 它连「有哪些表情可发」都不知道，只能干瞪眼。所以在收到别人发表情包时，
  * 顺手把身份证记下来存盘；以后 `qq_mface` 不传 id 就从收藏里随机挑一个发。
  *
- * ⚠️ 收藏是有门槛的（主人定的）：只收「鲸鱼娘 / AI 娘化」这类表情包，
- * 因为群里什么图都存会变成一个垃圾场。图片条目由 Agent 判断后主动调用
+ * ⚠️ 收藏是有门槛的：默认什么都不收（faceCollectHint 留空 = 关），因为你希望只收某一类图，
+ * 而不是把群里什么都存进来变成垃圾场。图片条目由 Agent 判断后主动调用
  * `qq_keep_face` 才进来，插件自己不自动保存图片。
  */
 
@@ -21,7 +21,7 @@ const MAX_KEEP = 200
 
 /**
  * 收藏文件：放在会话根目录（workspaceRoot）下，所有 QQ 会话共享一份。
- * 表情包是主人攒的资产，不该跟着某一次私聊一起过期。
+ * 表情包是攒出来的资产，不该跟着某一次私聊一起过期。
  */
 export function facesPath(config) {
   const base =
@@ -96,7 +96,7 @@ export function rememberFaces(config, mfacesLog) {
 }
 
 /**
- * 把一张本地图片收进收藏（Agent 判断是鲸鱼娘/AI 娘化表情包后主动调用）。
+ * 把一张本地图片收进收藏（Agent 判断值得收、或 faceCollectHint 命中后主动调用）。
  * @param {{ path: string, summary?: string }} input
  * @returns {{ ok: boolean, added: boolean, total: number, reason?: string }}
  */

@@ -25,7 +25,7 @@ export const ConfigSchema = Schema.object({
   // ── Agent ──
   provider: Schema.string().description('LLM provider 名称；留空跟随宿主默认'),
   model: Schema.string().description('模型名；留空跟随宿主默认'),
-  preset: Schema.string().description('Agent preset id（例如 whale）；留空使用宿主默认组合'),
+  preset: Schema.string().description('Agent preset id；留空使用宿主默认组合（unset = 跟随宿主）'),
   cwd: Schema.string().description('Agent 工作目录；留空使用宿主默认'),
   workspaceRoot: Schema.string()
     .default('')
@@ -33,12 +33,25 @@ export const ConfigSchema = Schema.object({
   isolateByPeer: Schema.boolean()
     .default(true)
     .description('每个私聊/每个群各自一个工作目录与记忆区（互不可见，也不碰宿主的私人记忆区）'),
+  persona: Schema.string()
+    .default('')
+    .description(
+      '角色设定：它是谁、什么性格、怎么称呼对方。留空则是一只没有名字、说话正常的普通助手——插件不会自带任何人的私人设定',
+    ),
+  ownerIds: Schema.array(Schema.string())
+    .default([])
+    .description(
+      '「主人」的 QQ 号，可多个。群聊里这些人的发言会标上主人称呼，Agent 会优先响应、问本机的事也正常答；不在名单里的群友一律按陌生人对待。留空则不区分任何人',
+    ),
+  ownerLabel: Schema.string()
+    .default('主人')
+    .description('群聊里怎么称呼这位主人，例如「主人」「老板」；默认「主人」'),
   directPrompt: Schema.string()
     .default('')
-    .description('私聊场景追加的系统提示词'),
+    .description('私聊时追加到每条投递文字最前面的补充指令（内置聊天规矩在 preset 里，这里放你自己的）'),
   groupPrompt: Schema.string()
     .default('')
-    .description('群聊场景追加的系统提示词'),
+    .description('群聊时追加到每条投递文字最前面的补充指令（内置聊天规矩在 preset 里，这里放你自己的）'),
   historyLimit: Schema.number()
     .default(20)
     .description('群聊时额外带入的最近消息条数（0 = 不带历史）'),
@@ -73,6 +86,11 @@ export const ConfigSchema = Schema.object({
     .description('privateMode=allowlist 时生效的 QQ 号列表'),
 
   // ── 图片 ──
+  faceCollectHint: Schema.string()
+    .default('')
+    .description(
+      '什么样的图值得收进表情包收藏（qq_keep_face），例如「猫猫梗图」。留空表示不收藏任何图片，只让 Agent 看图说话',
+    ),
   imageCacheDir: Schema.string()
     .default('')
     .description('收到的图片下载到哪个目录；留空用 <cwd>/图片缓存'),
@@ -85,11 +103,14 @@ export const ConfigSchema = Schema.object({
     .default(true)
     .description('收到语音时用本地 vosk 离线转成文字（不需要联网）'),
   asrPython: Schema.string()
-    .default('C:\\Python315\\python.exe')
-    .description('运行 ASR 脚本的 python 可执行文件路径'),
+    .default('python')
+    .description('运行 ASR 脚本的 python 可执行文件；默认要求 python 在 PATH 里，且装过 vosk + numpy'),
   asrScript: Schema.string()
-    .default('D:\\助手的专用文件\\tools\\asr.py')
-    .description('ASR 脚本路径'),
+    .default('')
+    .description('ASR 脚本路径；留空使用插件自带的 tools/asr.py'),
+  asrModel: Schema.string()
+    .default('')
+    .description('vosk 模型目录（必须是纯 ASCII 路径）；留空由 asr.py 自己找，也可用环境变量 VOSK_MODEL'),
   asrTimeoutMs: Schema.number()
     .default(60000)
     .description('单条语音转文字的超时时间，单位毫秒'),

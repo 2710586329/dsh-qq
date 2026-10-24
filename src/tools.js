@@ -488,7 +488,7 @@ export function registerTools(ctx, { client, manager, config, logger }) {
     name: 'qq_keep_face',
     description:
       '把一张本地图片收进「表情包收藏」，以后就能用 qq_mface 随机发出来。' +
-      '⚠️ 有门槛：只在图片确实是「鲸鱼娘 / AI 娘化」这类带字梗图、表情包时才收。' +
+      '⚠️ 有门槛：只有跟配置里 faceCollectHint 描述的那类图（没配就是一类都不收）才值得收。' +
       '普通照片、聊天截图、风景图、别人随手发的图 —— 一律不收。群里什么图都存会变成垃圾场。' +
       '收之前先 read_image 看一眼，确认是这类表情再收。',
     parameters: {

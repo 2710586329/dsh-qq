@@ -2,7 +2,7 @@
  * 把「Agent 想问你一句话」搬到 QQ 上。
  *
  * DSH 的 userQuestions 是 waterfall：`ctx.on('user-questions/request', (req, next) => ...)`。
- * 我们拦住属于 QQ 会话的请求，把问题渲染成短文本发到 QQ，等主人回复后
+ * 我们拦住属于 QQ 会话的请求，把问题渲染成短文本发到 QQ，等对方回复后
  * 拼成 `{ answers: [{ id, selected: [...], custom? }] }` 交回去。
  *
  * 注意：这是 `ask_user_question` 工具在无界面宿主机（qqbot profile）里唯一的出口——
