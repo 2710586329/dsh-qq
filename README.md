@@ -48,9 +48,14 @@
 **先把 DSH 完全退出**（托盘也要退掉，插件文件被占用会装到一半失败）。
 
 ```powershell
-# ① 从 Releases 下载 Source code (zip) 解压，或者 git clone 一份
-# ② 用 DSH 自带的那条 dsh 装（不是 npx）
-dsh plugin --profile desktop add "D:\dsh-qq-0.7.1"
+# 从 Releases 下载 dsh-qq-0.7.2.tgz，然后
+dsh plugin --profile desktop add "D:\下载\dsh-qq-0.7.2.tgz"
+```
+
+不想用打好的包，也可以直接装源码目录（`git clone`，或下 `Source code (zip)` 解压）：
+
+```powershell
+dsh plugin --profile desktop add "D:\dsh-qq-0.7.2"
 ```
 
 三个容易踩的坑：
@@ -67,8 +72,6 @@ dsh plugin --profile desktop add "D:\dsh-qq-0.7.1"
 ```powershell
 dsh plugin --profile desktop why dsh-qq
 ```
-
-> Release 里如果挂了 `.tgz` 附件（或者自己 `pnpm pack` 打一个），把上面的路径换成那个文件就行。
 
 ### 3. 重启 DSH，填连接信息
 
