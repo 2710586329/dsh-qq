@@ -5,6 +5,7 @@ import { OneBotClient } from './onebot/client.js'
 import { textSegments } from './onebot/segment.js'
 import { SessionManager } from './session.js'
 import { createInbound, historyLine, pushHistory } from './inbound.js'
+import { appendChatLog } from './chatlog.js'
 import { SILENT_MARKER } from './prompts.js'
 import { createOutbound } from './outbound.js'
 import { createContextGuard } from './context-guard.js'
@@ -193,6 +194,13 @@ export function apply(ctx, config) {
       record.recent.push(entry)
       const recentKeep = Math.max(80, (Number(config.contextMemoryKeep) || 30) * 3)
       if (record.recent.length > recentKeep) record.recent.splice(0, record.recent.length - recentKeep)
+
+      // 聊天流水：自己说的话也落盘，不然翻记录时只有对方在自言自语
+      if (config.chatLog !== false) {
+        const myId = manager.selfId || config.selfId || ''
+        const who = myId ? `${selfName}(${myId})` : selfName
+        appendChatLog(record.dir, { who, text: said }, logger).catch(() => {})
+      }
     }
 
     // 发完了，取消「正在输入」

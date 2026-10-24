@@ -2,6 +2,8 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { readMessage } from './onebot/segment.js'
 import { rememberFaces, facesCount } from './faces.js'
 import { buildChatPrompt, faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT, SILENT_HINT } from './prompts.js'
+import { resolvePeerWorkspace } from './workspace.js'
+import { appendChatLog } from './chatlog.js'
 import { mkdir, writeFile, readdir, unlink } from 'node:fs/promises'
 import { join, extname } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -360,6 +362,14 @@ export function createInbound({ config, manager, logger, client, send, approval,
     }
 
     const info = readMessage(event.message, { selfId, selfName: event.self_name ?? '机器人' })
+
+    // 聊天流水：跳过的消息也先记下来——「它怎么突然接不上话」全靠这段回查。
+    // 只落盘、不参与投递，写失败也不影响聊天。
+    if (config.chatLog !== false) {
+      const logDir = resolvePeerWorkspace(config, scope, peerId)
+      const who = `${senderName}(${event.user_id})`
+      appendChatLog(logDir, { who, text: info.text || '[图片]' }, logger).catch(() => {})
+    }
 
     // 纯图 / 纯语音 / 纯文件 / 纯表情包（没有文字）也要处理
     if (

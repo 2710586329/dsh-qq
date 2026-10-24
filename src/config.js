@@ -183,6 +183,13 @@ export const ConfigSchema = Schema.object({
     .default(30)
     .description('换会话前把最近多少条聊天记进 记忆区/压缩记忆/，给新会话接话用'),
 
+  // ── 聊天流水 ──
+  chatLog: Schema.boolean()
+    .default(true)
+    .description(
+      '把收到的消息和它自己说的话记进会话目录的 聊天记录/<日期>.md。关掉也能用，但那就会「聊完就忘」',
+    ),
+
   // ── 生命周期 ──
   sessionIdleTimeout: Schema.number()
     .default(1800000)
