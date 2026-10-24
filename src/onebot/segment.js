@@ -43,7 +43,28 @@ export function parseCQString(source) {
 }
 
 /** 统一成消息段数组，无论上游给的是数组还是 CQ 码字符串。 */
-export function toSegments(message) {
+export /**
+ * 从 mface 段里挖出「表情包身份证」：emoji_id + emoji_package_id。
+ *
+ * 有了这两个 id 才能反过来把同一个表情再发出去（`qq_mface` 要用）。
+ * 不同 QQ 版本字段名不一样，CDN 地址里也藏着 id，能挖就挖。
+ */
+function pickEmoji(data) {
+  const url = String(data?.url || data?.file || '')
+  let packageId = String(data?.emoji_package_id ?? data?.package_id ?? '')
+  let emojiId = String(data?.emoji_id ?? data?.emojiId ?? '')
+  if (!emojiId || !packageId) {
+    // https://gxh.vip.qq.com/club/item/parcel/item/{packageId}/{emojiId}/raw300.gif
+    const matched = url.match(/item\/([^/]+)\/([^/]+)\//)
+    if (matched) {
+      if (!packageId) packageId = matched[1]
+      if (!emojiId) emojiId = matched[2]
+    }
+  }
+  return { emojiId, packageId, key: String(data?.key ?? '') }
+}
+
+function toSegments(message) {
   if (Array.isArray(message)) return message
   if (typeof message === 'string') {
     // 不是 CQ 码的裸字符串，直接当文本
@@ -67,6 +88,8 @@ export function readMessage(message, { selfId, selfName = '' } = {}) {
   let text = ''
   const images = []
   const files = []
+  const records = []
+  const mfaces = []
   const atNames = []
   let atMe = false
   let atAll = false
@@ -102,9 +125,22 @@ export function readMessage(message, { selfId, selfName = '' } = {}) {
         text += `[表情${data.id ?? ''}]`
         break
       case 'mface':
+        // 表情包 ≠ 图片：它是"语气"，不是"内容"。单独收起来，别混进 images 让 agent 去描述画面。
+        mfaces.push({
+          url: data.url || data.file || '',
+          summary: data.summary || '',
+          ...pickEmoji(data),
+        })
         text += '[表情包]'
         break
       case 'record':
+        records.push({
+          file: data.file || '',
+          url: data.url || '',
+          path: data.path || '',
+          fileSize: data.file_size || '',
+          duration: data.duration || '',
+        })
         text += '[语音]'
         break
       case 'video':
@@ -153,6 +189,8 @@ export function readMessage(message, { selfId, selfName = '' } = {}) {
     text: text.trim(),
     images,
     files,
+    records,
+    mfaces,
     atNames,
     atMe,
     atAll,

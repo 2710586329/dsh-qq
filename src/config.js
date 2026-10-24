@@ -27,6 +27,12 @@ export const ConfigSchema = Schema.object({
   model: Schema.string().description('模型名；留空跟随宿主默认'),
   preset: Schema.string().description('Agent preset id（例如 whale）；留空使用宿主默认组合'),
   cwd: Schema.string().description('Agent 工作目录；留空使用宿主默认'),
+  workspaceRoot: Schema.string()
+    .default('')
+    .description('每个 QQ 会话的独立工作目录放在哪里；留空用 <cwd>/会话'),
+  isolateByPeer: Schema.boolean()
+    .default(true)
+    .description('每个私聊/每个群各自一个工作目录与记忆区（互不可见，也不碰宿主的私人记忆区）'),
   directPrompt: Schema.string()
     .default('')
     .description('私聊场景追加的系统提示词'),
@@ -36,11 +42,20 @@ export const ConfigSchema = Schema.object({
   historyLimit: Schema.number()
     .default(20)
     .description('群聊时额外带入的最近消息条数（0 = 不带历史）'),
+  quoteReply: Schema.boolean()
+    .default(true)
+    .description('收到的消息带引用时，把「被引用的人 + 原文」一并交给 Agent'),
+  maxTurnMs: Schema.number()
+    .default(600000)
+    .description('单轮回复最长等待时间，单位毫秒（默认 10 分钟；超时只提示，不打断 Agent）'),
 
   // ── 触发策略 ──
   requireMention: Schema.boolean()
     .default(true)
     .description('群聊里是否必须 @ 机器人才回复'),
+  groupWakeMs: Schema.number()
+    .default(300000)
+    .description('群里被 @ 过一次之后，多久内不用再 @ 也能接话，单位毫秒（0 = 关闭）'),
   replyToPrivate: Schema.boolean()
     .default(true)
     .description('是否响应私聊'),
@@ -57,6 +72,28 @@ export const ConfigSchema = Schema.object({
     .default([])
     .description('privateMode=allowlist 时生效的 QQ 号列表'),
 
+  // ── 图片 ──
+  imageCacheDir: Schema.string()
+    .default('')
+    .description('收到的图片下载到哪个目录；留空用 <cwd>/图片缓存'),
+  imageMaxMB: Schema.number()
+    .default(8)
+    .description('单张图片最大体积（MB），超过就丢弃不下载'),
+
+  // ── 语音转文字（离线 vosk） ──
+  asrEnabled: Schema.boolean()
+    .default(true)
+    .description('收到语音时用本地 vosk 离线转成文字（不需要联网）'),
+  asrPython: Schema.string()
+    .default('C:\\Python315\\python.exe')
+    .description('运行 ASR 脚本的 python 可执行文件路径'),
+  asrScript: Schema.string()
+    .default('D:\\助手的专用文件\\tools\\asr.py')
+    .description('ASR 脚本路径'),
+  asrTimeoutMs: Schema.number()
+    .default(60000)
+    .description('单条语音转文字的超时时间，单位毫秒'),
+
   // ── 输出 ──
   textChunkLimit: Schema.number()
     .default(1500)
@@ -67,6 +104,15 @@ export const ConfigSchema = Schema.object({
   splitDelayMs: Schema.number()
     .default(400)
     .description('分条发送之间的间隔，单位毫秒'),
+  rateLimitPerMin: Schema.number()
+    .default(12)
+    .description('每个会话每分钟最多发几条（0 = 关闭）。QQ 对高频回复很敏感，被限流甚至被封往往不是因为说了什么，而是因为回得太多'),
+  streamReply: Schema.boolean()
+    .default(true)
+    .description('私聊是否边生成边发（群聊始终整段发）'),
+  streamMaxChunks: Schema.number()
+    .default(3)
+    .description('一个回合里最多流式发几条，超出就攒起来一起发'),
 
   // ── 生命周期 ──
   sessionIdleTimeout: Schema.number()
