@@ -2,7 +2,14 @@
 
 本文件记录 dsh-qq 的版本变更。格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号照 [SemVer](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.6.0] - 2026-10-24
+### 新增
+- **DSH 设置页**：DSH 的设置里多出一节「QQ」，可以直接调人设、人设文件路径、工作区/记忆区地址、群聊节奏、谁能跟它说话、同类机器人开关等 34 项，不用再手改 `cordis.patch.yml`。
+  - 两个保险：优先挂到宿主的 `/api/dsh-qq` 路由（`ctx.inject(['webServer'], …)` 运行时注入，不阻塞插件激活）；挂不上就由插件自己在 `127.0.0.1:34569` 起一个本地服务，设置页脚本会先探相对路径、失败自动回退到本地端口。
+  - 配置落在 `$DSH_HOME/dsh-qq/settings.json`，只覆盖显式设过的键；值置空 = 回到默认。不碰 profile 的 `cordis.patch.yml`。
+- 新增 `uiOnly`：桌面 / Web GUI 那份只提供设置页、不连 NapCat（否则同一个 QQ 号在两处登录会互相抢消息）。
+- 新增 `personaFile`：填了就从文件读人设覆盖 `persona`，文件读不到只警告、不清空已有的人设。
+
 ### 文档
 - README 新增「私用和发布是两层」：代码层只放跟角色无关的通用规矩，人设和称呼一律留在配置层（`persona` / `directPrompt` / `groupPrompt` / `ownerLabel`），提 PR 时不要把私人称呼、真实 QQ 号、群里的梗写进 `src/`。
 - 清掉 `src/` 与 `test/` 里最后一批评测用真号与私人称呼：`src/config.js` 的 `peerBots` 描述「别的鱼」→「别的机器人」；`test/e2e.mjs`、`test/context-guard.test.mjs` 里的真人昵称、真实 QQ 号、群梗一律换成 `群友甲` / `20001` / `10003`。

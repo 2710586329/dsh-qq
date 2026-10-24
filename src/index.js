@@ -12,6 +12,12 @@ import { splitText, sleep } from './shared/chunk.js'
 import { registerTools } from './tools.js'
 import { ApprovalChannel } from './approval.js'
 import { QuestionChannel } from './questions.js'
+import {
+  applyOverrides,
+  installSettingsApi,
+  loadOverrides,
+  resolvePersonaFile,
+} from './settings.js'
 
 export const name = 'dsh-qq'
 export const inject = ['agents']
@@ -60,8 +66,41 @@ function safeJson(v) {
  * 私聊 / 群聊各对应一个持久 Agent 会话，消息进来 followup，回复走 session/event 出去。
  */
 export function apply(ctx, config) {
+  // ⭐ 设置页存下来的覆盖**先于**其它一切生效：logger 的 debug 开关也吃这一层。
+  //    这样「在设置里改人设 / 改记忆区路径」不用去碰 profile 的 cordis.patch.yml。
+  const savedOverrides = loadOverrides(ctx)
+  const appliedOverrides = applyOverrides(config, savedOverrides)
   const logger = makeLogger(ctx, config)
+  if (appliedOverrides.length > 0) logger.info(`已应用设置页覆盖: ${appliedOverrides.join(', ')}`)
+  // 设置页保存后要就地刷新这两份状态：persona 可能换了文件，覆盖表可能变了
+  const overridesRef = { current: savedOverrides }
+  const personaRef = { current: resolvePersonaFile(config, logger) }
   const agents = ctx?.agents
+
+  // 设置页接口：**运行时注入** webServer，而不是写进顶层 `export const inject`。
+  // 有网页服务的宿主（Desktop / Web GUI）才会回调进来；headless 的 qqbot 永远不回调，
+  // 于是插件照常激活、QQ 照常在线。顶层声明的话，headless 会一直等 provider →
+  // 整个插件不激活 → 机器人直接掉线（2026-10-24 踩过）。
+  //
+  // 注意：把**父 ctx** 传下去，只借注入回调拿到的 webServer 实例。
+  // 路由的 effect 必须挂在父 ctx 上；挂在注入回调那个子 ctx 上，回调一结束就被收走
+  // —— 现象是 api-state 写 ok=true、前端却一直 404（2026-10-24 第二次踩）。
+  const mountSettingsApi = (extra = {}) => {
+    // 测试桩 / 极简宿主可能没有 ctx.inject，这时候跳过就好，别让整个插件崩
+    if (typeof ctx.inject !== 'function') return
+    ctx.inject(['webServer'], (sub) =>
+      installSettingsApi({ ctx, webServer: sub.webServer, config, logger, ...extra }),
+    )
+  }
+
+  // 只当「设置面板」用：桌面 / Web GUI 那份只提供这一页，不去连 NapCat。
+  // 不然同一个 QQ 号在两处同时登录，消息会互相抢。
+  if (config.uiOnly) {
+    mountSettingsApi({ personaRef, overridesRef })
+    logger.info('uiOnly：只提供设置页，不连接 NapCat')
+    return
+  }
+
   if (!agents) {
     logger.warn('宿主没有 agents 服务，dsh-qq 不启动')
     return
@@ -204,6 +243,11 @@ export function apply(ctx, config) {
   client.start()
 
   registerTools(ctx, { client, manager, config, logger })
+
+  // ── 设置页接口：/api/dsh-qq/* ─────────────────────────────────────────────
+  // DSH 设置界面里那一页（client.js）打的就是这几个口。
+  mountSettingsApi({ client, manager, personaRef, overridesRef })
+
 
   ctx.on('dispose', () => {
     try {

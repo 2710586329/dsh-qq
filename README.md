@@ -182,6 +182,49 @@ ownerLabel: 老板             # 群里怎么称呼他，默认「主人」
 
 ---
 
+## 在 DSH 设置里调它
+
+不想手改 YAML 的话，DSH 的**设置 → QQ** 那一节就是一个面板，34 项都能点着改：
+
+| 分组 | 能改什么 |
+| --- | --- |
+| 状态 | 连接点、登录账号、家目录、设置文件；两个按钮「重连」「重新读一遍」 |
+| 连接 | `wsUrl`、`accessToken`、`selfId` |
+| 它人设 | `persona`（文本域）、`personaFile`（人设文件路径）、`ownerLabel` |
+| 补充提示 | `directPrompt`、`groupPrompt` |
+| 记忆区与工作区 | `workspaceRoot`、`isolateByPeer` |
+| 群里怎么说话 | `requireMention`、`groupWakeMs`、`groupReplyGapMs`、`groupMinGapMs`、`rateLimitPerMin`、`historyLimit` |
+| 谁能跟它说话 | `privateMode`、`privateAllow`、`ownerIds`、`groupMode`、`groupAllow` |
+| 同类机器人 | `botChatEnabled`、`peerBots` |
+| 其它 | `debug`、`textChunkLimit`、`splitDelayMs` |
+
+改完立刻生效（只有 `wsUrl` / `accessToken` 需要点「重连」，`reconnectMs` / `selfId` / `workspaceRoot` / `isolateByPeer` / `asrPython` 需要重启宿主）。设置写在 `$DSH_HOME/dsh-qq/settings.json`，只覆盖你显式设过的键，清空就回到默认——**不动 profile 的 `cordis.patch.yml`**。
+
+### 为什么要有 `uiOnly`
+
+同一个 QQ 号不能在两处同时登录（会互相抢消息）。所以桌面 / Web GUI 那份插件配 `uiOnly: true`：只提供设置页，不连 NapCat；真正干活的仍然是 `--profile qqbot` 那个宿主。
+
+### 装到桌面侧
+
+桌面 profile 装插件必须在 **DSH Desktop 完全退出时**做：
+
+```bash
+dsh plugin --profile desktop add /path/to/dsh-qq
+```
+
+> ⚠️ 别在 Desktop 运行中装，也别手改 profile 的 `package.json` / `pnpm-lock.yaml` / `node_modules`——pnpm 会对所有包做重排，撞到被占用的包就整体失败，最坏的情况是 `@deepseek-ai/dsh-web-app` 这类包被弄丢，DSH 启动直接报「web 缺失或文件损坏」。（这个坑真踩过，2026-10-24。）
+
+### 接口怎么走的
+
+| 路 | 说明 |
+| --- | --- |
+| ① 宿主路由 `/api/dsh-qq` | `ctx.inject(['webServer'], …)` 运行时注入；拿到就挂 |
+| ② 本地服务 `127.0.0.1:34569` | 插件自己 `createServer`；设置页脚本先探 ①，失败自动回退 ② |
+
+本地服务只监听回环地址，CORS 放开是为了让 DSH 页面能跨端口读。`headless` 宿主（`--profile qqbot`）没有网页服务，所以它不会起 ②，也不影响 QQ。
+
+---
+
 ## 配置项速查
 
 | 配置 | 默认 | 说明 |

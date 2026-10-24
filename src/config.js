@@ -27,6 +27,11 @@ export const ConfigSchema = Schema.object({
   model: Schema.string().description('模型名；留空跟随宿主默认'),
   preset: Schema.string().description('Agent preset id；留空使用宿主默认组合（unset = 跟随宿主）'),
   cwd: Schema.string().description('Agent 工作目录；留空使用宿主默认'),
+  uiOnly: Schema.boolean()
+    .default(false)
+    .description(
+      '只提供 DSH 设置界面里的那一页，不连接 NapCat、不起会话。桌面 / Web 那份装一份、配成 true，就是纯设置面板；QQ 本体跑在另一个 profile 里，不然同一个号两处登录会抢消息',
+    ),
   workspaceRoot: Schema.string()
     .default('')
     .description('每个 QQ 会话的独立工作目录放在哪里；留空用 <cwd>/会话'),
@@ -37,6 +42,11 @@ export const ConfigSchema = Schema.object({
     .default('')
     .description(
       '角色设定：它是谁、什么性格、怎么称呼对方。留空则是一只没有名字、说话正常的普通助手——插件不会自带任何人的私人设定',
+    ),
+  personaFile: Schema.string()
+    .default('')
+    .description(
+      '人设文件路径（比如 D:/某个角色.md）。填了就从这个文件读人设，覆盖上面的 persona；文件读不到时保留 persona，不会把角色弄丢',
     ),
   ownerIds: Schema.array(Schema.string())
     .default([])
