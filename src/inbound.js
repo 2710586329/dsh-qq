@@ -2,6 +2,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { readMessage } from './onebot/segment.js'
 import { rememberFaces, facesCount, facesForPrompt } from './faces.js'
 import { buildChatPrompt, faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT, SILENT_HINT } from './prompts.js'
+import { evaluateWakeTrigger, rollWakeProbability } from './wake-trigger.js'
 import { factsFileFor, loadFactsFor, loadHandoffFor } from './settings.js'
 import { resolvePeerWorkspace } from './workspace.js'
 import { appendChatLog } from './chatlog.js'
@@ -107,6 +108,11 @@ const groupReplies = new Map()
  *  也不会跟「窗口内说话续期」打架（用户 2026-10-24 发现的冲突）。 */
 const groupLastReplyAt = new Map()
 
+/** 被 groupReplyGapMs 压住的消息：到点自己醒一次。
+ *  没有它，「攒着」就是永久沉默 —— 2026-10-25 群 580579694 实况：
+ *  @ 回过一句、下一句在 20 秒内被压进 backlog，姐姐不再开口，就再没动静。 */
+const gapReplayTimers = new Map()
+
 /** 距上次回复够不够久。0/负数 = 不限，永远够。 */
 function gapReady(config, groupId, userId) {
   const gap = Number(config.groupReplyGapMs) || 0
@@ -133,6 +139,27 @@ function wakeKey(groupId, userId) {
 function wakeAlive(groupId, userId) {
   const until = groupWakeUntil.get(wakeKey(groupId, userId)) ?? 0
   return until > Date.now()
+}
+
+/** 每个人上一条消息的时间：判断「连着聊」还是「人已经走开了」。
+ *  2026-10-25 姐姐定的：窗里说话跟上一条隔得比 groupWakeIdleMs 久，窗就当场关 ——
+ *  不然群里隔三四十秒插一句也会一直续着，「被 @ 了就停不下来」。 */
+const groupLastMsgAt = new Map()
+
+/** 距这个人上一条消息超过续期门槛了没（0 = 关掉这个门槛，永远不算超）。 */
+function wakeIdleExceeded(config, groupId, userId) {
+  const idleMs = Number(config.groupWakeIdleMs) || 0
+  if (idleMs <= 0) return false
+  const last = groupLastMsgAt.get(wakeKey(groupId, userId)) ?? 0
+  if (!last) return false
+  return Date.now() - last > idleMs
+}
+
+/** 当场关窗：人已经停下来了，别再等着接下一句。 */
+function closeWake(groupId, userId) {
+  const key = wakeKey(groupId, userId)
+  groupWakeUntil.delete(key)
+  groupReplies.delete(key)
 }
 
 function refreshWake(config, groupId, userId) {
@@ -393,6 +420,28 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
   return async function onEvent(event) {
     if (event?.post_type !== 'message') return
+    // 补回：这条是「被间隔压住、到点自己醒过来」的重放，不是新消息。
+    // 重放要跳过所有前置闸（@/保活/间隔/额度），否则又会被压一轮，永远出不来。
+    const isReplay = event?.__replay === true
+
+    // 到点自己醒一次：间隔一过就把压住的那句补回去（否则就是永久沉默）。
+    const scheduleGapReplay = (evt, gid, uid) => {
+      const key = wakeKey(gid, uid)
+      const gap = Number(config.groupReplyGapMs) || 0
+      const last = groupLastReplyAt.get(key) ?? 0
+      const wait = Math.max(800, gap - (Date.now() - last) + 400)
+      const prev = gapReplayTimers.get(key)
+      if (prev) clearTimeout(prev)
+      const timer = setTimeout(() => {
+        gapReplayTimers.delete(key)
+        // 这期间要是有新消息把 backlog 取走了，重放自己会 no-op（拿不到正文）。
+        Promise.resolve(onEvent({ ...evt, __replay: true })).catch((err) => {
+          logger.debug?.(`[dsh-qq] 补回被压住的消息失败: ${err?.message || err}`)
+        })
+      }, wait)
+      timer.unref?.()
+      gapReplayTimers.set(key, timer)
+    }
 
     const selfId = String(event.self_id ?? manager.selfId ?? '')
     if (event.self_name) manager.selfName = String(event.self_name)
@@ -436,6 +485,10 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
     const senderId = String(event.user_id ?? '')
 
+    // 先用「上一条的时间」判断停没停，再把这条记进去 —— 连着聊才续期。
+    const idleExceeded = isGroup && wakeIdleExceeded(config, peerId, senderId)
+    if (isGroup) groupLastMsgAt.set(wakeKey(peerId, senderId), Date.now())
+
     // ── 引用：先查一次「这句在接谁的话」。
     // 一次 get_msg 同时干两件事：判断这条是不是在跟我说话（下面），以及给正文加引用提示（再下面）。
     // 只有真带引用才发请求，群里引用不常见，不会拖慢平时。
@@ -465,6 +518,16 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 引用的是我自己 → 等于在叫我（qq-bridge 的 quoteTargetIsSelf）
     const quotedMe = Boolean(quoteInfo?.ok && quoteInfo.userId && quoteInfo.userId === selfId)
 
+    // 补回时：这一句自己还躺在 backlog 里，先摘掉，免得同一句在上下文里出现两次。
+    // 按「结尾正文」匹配，不按整行 —— 行首带秒级时间戳，重放时早就对不上了。
+    if (isReplay) {
+      const myText = `] ${info.text || '[图片]'}`
+      const arr = drainBacklog(peerId)
+      const idx = arr.findLastIndex((line) => line.endsWith(myText))
+      if (idx >= 0) arr.splice(idx, 1)
+      for (const line of arr) keepBacklog(peerId, line)
+    }
+
     // 同类机器人（群里另一个机器人）：开关关着就完全不接，连 @ 也不接。
     // 用户 2026-10-24：「吵架功能单独做个开关，这个开关控制它要不要和同类聊天，以及对比较冲的同类回怼」。
     // 关着的时候它说什么都跟我们无关 —— 同类之间的帐先不算。
@@ -476,7 +539,10 @@ export function createInbound({ config, manager, logger, client, send, approval,
     }
 
     // 群聊：默认要 @ 才理；@ 过一次之后有一小段「保活期」，不用再 @
-    if (isGroup && config.requireMention && !info.atMe) {
+    // addressedBy：没 @ 但被「叫名字 / 点名提问 / 关键词」叫住的理由（2026-10-25）。
+    // 这种算「有人冲它来了」，必须回，不给 [SILENT] 出口。
+    let addressedBy = null
+    if (isGroup && config.requireMention && !info.atMe && !isReplay) {
       // 没 @ 我、却 @ 了别人（包括群里另一个机器人）：那明显不是跟我说话，
       // 保活期也不算 —— 否则别人一句「@ 那个谁 来帮我测一下」它也会冲上去接。
       if (info.atNames.length > 0) {
@@ -484,35 +550,75 @@ export function createInbound({ config, manager, logger, client, send, approval,
         keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
         return
       }
+
+      // ── 非 @ 叫醒（学 qq-bridge 的 evaluateWakeTriggerV2）──
+      // 「@」只是叫人的一种方式：群里叫名字、点名问它、催一句「在不在」，
+      // 都是在叫它，不该因为少个 @ 就装没听见。
+      // 只拿本条消息自己的文字判，不拿带引用原文的拼接文本 —— 否则引用一条
+      // 恰好提到昵称的旧消息，也会被当成在叫它。
+      addressedBy = evaluateWakeTrigger({
+        plainText: info.text || '',
+        atMe: info.atMe,
+        quotedMe,
+        names: [manager.selfName, event?.self_name, ...(config.groupWakeNames ?? [])].filter(Boolean),
+        triggers: {
+          nameMention: config.groupWakeNameMention,
+          question: config.groupWakeQuestion,
+          keywords: config.groupWakeKeywords,
+        },
+      })
+      if (addressedBy) {
+        logger.debug?.(`[dsh-qq] 群 ${peerId} 没 @ 但命中 ${addressedBy}，按叫我处理`)
+      }
+
       // 保活窗口只认「当初 @ 我的那个人」：别人说话既不能续期、也不能蹭用。
       // 2026-10-24 取消了「主人永久免 @」—— 试完反馈「只回我确实看着怪」：
       // 群友要 @ 才理，主人却随时都接，一是不公平，二是「唤醒一次后超时也没停」。
       // 现在主人也走窗口，只是窗口是 60 秒（群友提的方案），窗口内说话照样续期。
-      if (!quotedMe && !wakeAlive(peerId, senderId)) {
-        logger.debug?.(`[dsh-qq] 群 ${peerId} 未 @ 且不在保活期，跳过`)
-        // 这句没叫我们，但它是上下文的一部分：下一句很可能就在接它。
-        keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
-        return
+      if (!quotedMe && !addressedBy) {
+        // 停太久：窗里也当没窗了 —— 「5 秒内没接话就关」（2026-10-25 姐姐定）。
+        if (idleExceeded) {
+          closeWake(peerId, senderId)
+          logger.debug?.(`[dsh-qq] 群 ${peerId} 保活窗里停太久（>${config.groupWakeIdleMs}ms），窗关掉，跳过`)
+          keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
+          return
+        }
+        if (!wakeAlive(peerId, senderId)) {
+          // 概率唤醒：没人叫它，但有很小概率顺带看一眼。
+          // 这种「路过」不强制回 —— 下面 mustReply 会是 false，自动带上 [SILENT] 出口。
+          if (rollWakeProbability(config.groupWakeProbability)) {
+            logger.debug?.(
+              `[dsh-qq] 群 ${peerId} 概率唤醒（${config.groupWakeProbability}），顺带看一眼`,
+            )
+          } else {
+            logger.debug?.(`[dsh-qq] 群 ${peerId} 未 @ 且不在保活期，跳过`)
+            // 这句没叫我们，但它是上下文的一部分：下一句很可能就在接它。
+            keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
+            return
+          }
+        }
       }
       if (quotedMe) logger.debug?.(`[dsh-qq] 群 ${peerId} 引用了我，按叫我处理`)
     }
     // 窗口续期（QLark 的 touch()）：@ 我、引用我、或者本来就在窗口里接着说话，都续上。
     // 但只有窗口的「正主」能续 —— 别人说话不续期也不蹭用，这条一松就变成群里谁说话都接。
-    if (isGroup && (info.atMe || quotedMe || wakeAlive(peerId, senderId))) {
+    if (isGroup && (info.atMe || quotedMe || addressedBy || wakeAlive(peerId, senderId))) {
       refreshWake(config, peerId, senderId)
     }
 
     // 均匀回应：距上次回复太近就先攒着（消息进 backlog，下次一起看见），别连珠炮。
-    if (isGroup && !gapReady(config, peerId, senderId)) {
+    // 但「攒着」得有兜底：间隔一过就自己醒一次，不然这句就永远躺在 backlog 里。
+    if (isGroup && !isReplay && !gapReady(config, peerId, senderId)) {
       logger.debug?.(
-        `[dsh-qq] 群 ${peerId} 距上次回复不到 ${config.groupReplyGapMs}ms，先攒着`,
+        `[dsh-qq] 群 ${peerId} 距上次回复不到 ${config.groupReplyGapMs}ms，先攒着（到点补回）`,
       )
       keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
+      scheduleGapReplay(event, peerId, senderId)
       return
     }
 
     // 窗口内回复额度（可选，默认 0 = 不限；和「续期」一起用要注意，别设太小）
-    if (isGroup && repliesLeft(config, peerId, senderId) <= 0) {
+    if (isGroup && !isReplay && repliesLeft(config, peerId, senderId) <= 0) {
       logger.debug?.(
         `[dsh-qq] 群 ${peerId} 这个保活窗口已经回过 ${config.groupRepliesPerWindow} 次，先歇着`,
       )
@@ -698,7 +804,9 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
     // 群聊里没被 @、也不是引用着我的：给一个「可以不接」的出口。
     // 私聊、被 @、被引用回复这三种情况必须回，就不给出口 —— 该说话的时候别装死。
-    const mustReply = !isGroup || info.atMe || quotedMe
+    // 2026-10-25 补：被叫名字 / 点名提问 / 关键词叫住的（addressedBy）也算被点名，同样必须回；
+    // 只有「概率唤醒」那种路过看一眼的，才留 [SILENT] 出口。
+    const mustReply = !isGroup || info.atMe || quotedMe || isReplay || Boolean(addressedBy)
     if (!mustReply) parts.push(SILENT_HINT)
 
     if (imagePaths.length > 0) {
@@ -771,6 +879,11 @@ export function createInbound({ config, manager, logger, client, send, approval,
       record.swapSeed = null
       record.chatPromptInjected = true
     }
+
+    // 错过睡前提醒的补刀：会话是有人说话才建的，23:30 那一刻内存里可能一个会话都没有，
+    // tick 的提醒就白丢了。等真的有人说话时补一句，塞进这一轮的提示词里，不多开一轮。
+    const lateBed = sleep?.takeLateBedtime?.(record)
+    if (lateBed) parts.unshift(lateBed, '')
 
     const body = parts.join('\n')
 

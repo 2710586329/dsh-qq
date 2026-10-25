@@ -420,8 +420,12 @@ window.__ModuleLoader__.load({
         document.head.appendChild(style)
         ctx.effect(() => () => style.remove(), 'dsh-qq: 设置页样式')
 
-        const slots = (typeof ctx.get === 'function' ? ctx.get('slots') : undefined) || ctx.slots
-        if (!slots) return
+        // 0.2.1 里服务直接挂在 ctx 上（官方插件写的就是 ctx.slots）；ctx.get 只作旧式兜底。
+        const slots = ctx.slots || (typeof ctx.get === 'function' ? ctx.get('slots') : undefined)
+        if (!slots) {
+          console.error('[dsh-qq] slots 服务不可用，设置页挂不上去')
+          return
+        }
         slots.inject('settings.section', () => slots.register(
           { name: 'settings.section', id: 'dsh-qq', order: 40, label: 'QQ' },
           () => h(Panel),

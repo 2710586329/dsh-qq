@@ -168,5 +168,36 @@ const textOf = (message) => message?.content?.[0]?.text ?? ''
   s.stop()
 }
 
+// 6) 错过睡前提醒的补刀（2026-10-25：会话是有人说话才建的，23:30 那一刻可能一个会话都没有）
+{
+  const r = fakeRecord('私聊己')
+  const s = createSleep({ config: makeConfig(), manager: fakeManager([r]), logger: {} })
+
+  check('还没到点不补', s.takeLateBedtime(r, new Date(2026, 9, 25, 23, 20)), '')
+  check('23:29 不补', s.takeLateBedtime(r, new Date(2026, 9, 25, 23, 29)), '')
+  const late = s.takeLateBedtime(r, new Date(2026, 9, 25, 23, 34))
+  check('过了点补一句', late.includes('23:30'), true)
+  check('补的话带上现在几点', late.includes('23:34'), true)
+  check('同一天不重复补', s.takeLateBedtime(r, new Date(2026, 9, 25, 23, 40)), '')
+  check('群聊不催睡', s.takeLateBedtime(fakeRecord('群', 'group'), new Date(2026, 9, 25, 23, 34)), '')
+  s.stop()
+}
+
+// 进了休息窗口就别再说「该睡了」
+{
+  const r = fakeRecord('私聊庚')
+  const s = createSleep({ config: makeConfig(), manager: fakeManager([r]), logger: {} })
+  check('凌晨不补提醒', s.takeLateBedtime(r, new Date(2026, 9, 26, 1, 0)), '')
+  s.stop()
+}
+
+// 总开关关掉就不补
+{
+  const r = fakeRecord('私聊辛')
+  const s = createSleep({ config: makeConfig({ sleepMode: false }), manager: fakeManager([r]), logger: {} })
+  check('关掉后不补', s.takeLateBedtime(r, new Date(2026, 9, 25, 23, 34)), '')
+  s.stop()
+}
+
 console.log(`\n作息测试：${pass} 项通过${fail ? `，${fail} 项失败` : ''}`)
 process.exit(fail ? 1 : 0)

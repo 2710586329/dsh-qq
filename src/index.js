@@ -6,11 +6,13 @@ import { textSegments } from './onebot/segment.js'
 import { SessionManager } from './session.js'
 import { createInbound, historyLine, pushHistory } from './inbound.js'
 import { appendChatLog } from './chatlog.js'
-import { SILENT_MARKER } from './prompts.js'
+import { SILENT_MARKER, personaLeaks } from './prompts.js'
 import { createOutbound } from './outbound.js'
 import { createWake } from './wake.js'
 import { createSleep } from './sleep.js'
+import { startLearning } from './learning.js'
 import { createContextGuard } from './context-guard.js'
+import { auditOutbound } from './audit.js'
 import { splitText, sleep } from './shared/chunk.js'
 import { registerTools } from './tools.js'
 import { ApprovalChannel } from './approval.js'
@@ -124,7 +126,17 @@ export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger)
         for (const key of Object.keys(overridesRef.current)) delete overridesRef.current[key]
         Object.assign(overridesRef.current, next)
       }
-      if (personaRef) personaRef.current = resolvePersonaFile(config, logger)
+      if (personaRef) {
+        personaRef.current = resolvePersonaFile(config, logger)
+        try {
+          const leak = personaLeaks(personaRef.current)
+          if (!leak.ok) {
+            logger.warn(`人设里出现了工具用法（${leak.hits.join('、')}）——这些属于行为层，人设只该写「我是谁」。`)
+          }
+        } catch {
+          /* ignore */
+        }
+      }
       logger.info(
         applied.length > 0
           ? `settings.json 变了，已就地应用: ${applied.join(', ')}（不用重启）`
@@ -175,6 +187,19 @@ export function apply(ctx, config) {
   // 设置页保存后要就地刷新这两份状态：persona 可能换了文件，覆盖表可能变了
   const overridesRef = { current: savedOverrides }
   const personaRef = { current: resolvePersonaFile(config, logger) }
+
+  // 两层提示词的边界检查：人设里混进工具名，日志留痕但不阻止（怎么写是人家的自由）。
+  try {
+    const leak = personaLeaks(personaRef.current)
+    if (!leak.ok) {
+      logger.warn(
+        `人设里出现了工具用法（${leak.hits.join('、')}）——这些属于行为层，人设只该写「我是谁」。` +
+          '工具改名或换宿主时这段会变成错的指引。',
+      )
+    }
+  } catch {
+    /* ignore */
+  }
   const agents = ctx?.agents
 
   // 另一个进程（设置面板）改了 settings.json 时，这边自己跟上，不用重启宿主
@@ -250,6 +275,20 @@ export function apply(ctx, config) {
     }
     const chunks = splitText(text, config.textChunkLimit)
     if (chunks.length === 0) return
+
+    // 外发审计：本机路径 / 凭据整条拦下。流式、整段、报错提示都从这里出去，
+    // 所以闸放在 split 之后、真正调 OneBot 之前，一处堵死。
+    if (config.auditOutbound !== false) {
+      const verdict = auditOutbound(trimmed, {
+        extraPatterns: config.auditExtraPatterns ?? [],
+      })
+      if (!verdict.ok) {
+        logger.warn(
+          `[dsh-qq] ${record.label} 外发被审计拦下（${verdict.kind}）：${verdict.hit}`,
+        )
+        return
+      }
+    }
     const isGroup = record.scope === 'group'
     const action = isGroup ? 'send_group_msg' : 'send_private_msg'
     const target = isGroup ? { group_id: Number(record.peerId) } : { user_id: Number(record.peerId) }
@@ -325,6 +364,14 @@ export function apply(ctx, config) {
   const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime })
   const outbound = createOutbound({ manager, config, logger, send, wake })
 
+  // 群黑话 / 角色知识学习：每 20 分钟扫一次群聊记录，把「鲸鲸自己卡壳」的地方
+  // 记进该群 记忆区/群词典.md 的「待确认」节（只追加、去重）。
+  const disposeLearning = startLearning({
+    workspaceRoot: config.workspaceRoot ?? process.cwd(),
+    selfId: () => manager.selfId || config.selfId || '',
+    logger,
+  })
+
   const offSessionEvent = ctx.on('session/event', outbound)
   const offGuardEvent = ctx.on('session/event', contextGuard.onSessionEvent)
 
@@ -373,6 +420,7 @@ export function apply(ctx, config) {
     try {
       offSessionEvent?.()
       offGuardEvent?.()
+      disposeLearning?.()
     } catch {
       /* ignore */
     }

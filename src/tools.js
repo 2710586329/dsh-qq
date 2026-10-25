@@ -13,6 +13,22 @@ import { join, dirname } from 'node:path'
 
 import { pickFace, keepFace, facesCount, faceSendState, markFaceSent, listFaces } from './faces.js'
 import { appendFact } from './settings.js'
+import { auditOutbound } from './audit.js'
+
+/**
+ * 工具直接发出去的文字也要过审计。
+ * 命中就抛错——不静默吞掉：模型得知道自己这条没发出去，才好换个说法，
+ * 否则它会以为已经说了，然后接着往下编。
+ */
+function assertOutboundText(config, logger, text) {
+  if (config?.auditOutbound === false) return
+  const verdict = auditOutbound(text, { extraPatterns: config?.auditExtraPatterns ?? [] })
+  if (verdict.ok) return
+  logger?.warn?.(`[dsh-qq] 工具外发被审计拦下（${verdict.kind}）：${verdict.hit}`)
+  throw new Error(
+    `这条没有发出去：内容里带了本机路径或凭据特征（${verdict.kind}）。换个说法再试。`,
+  )
+}
 
 const POKE_DESC =
   '戳一戳当前对话里的对方（私聊戳好友，群聊戳那位发言的人）。用来提醒对方注意、' +
@@ -451,6 +467,7 @@ export function registerTools(ctx, { client, manager, config, logger }) {
       const record = needRecord(manager, exec)
       const text = String(args?.text ?? '')
       if (!text) throw new Error('qq_reply: text 不能为空')
+      assertOutboundText(config, logger, text)
       const quoted = Number(args?.message_id ?? record.lastMessageId ?? 0) || 0
       const segments = []
       if (quoted > 0) segments.push({ type: 'reply', data: { id: String(quoted) } })
@@ -508,6 +525,7 @@ export function registerTools(ctx, { client, manager, config, logger }) {
       const record = needRecord(manager, exec)
       const text = String(args?.text ?? '')
       if (!text) throw new Error('qq_send: text 不能为空')
+      assertOutboundText(config, logger, text)
 
       // 解析目标：默认当前会话
       let action = record.scope === 'group' ? 'send_group_msg' : 'send_private_msg'

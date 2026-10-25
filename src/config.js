@@ -62,6 +62,11 @@ export const ConfigSchema = Schema.object({
   groupPrompt: Schema.string()
     .default('')
     .description('群聊时追加到每条投递文字最前面的补充指令（内置聊天规矩在 preset 里，这里放你自己的）'),
+  aiGirls: Schema.boolean()
+    .default(true)
+    .description(
+      '把「AI 娘图鉴」夹进提示词：群友说到 DeepSeek 娘、龙娘、通义娘这些同人角色时认得出来，不会当成真人或瞎猜。大约多几百字，嫌占地方可以关掉',
+    ),
   historyLimit: Schema.number()
     .default(20)
     .description('群聊时额外带入的最近消息条数（0 = 不带历史）'),
@@ -79,6 +84,11 @@ export const ConfigSchema = Schema.object({
   groupWakeMs: Schema.number()
     .default(60000)
     .description('群里被 @ 过一次之后，多久内不用再 @ 也能接话，单位毫秒（0 = 关闭；2026-10-24 按群友的建议从 5 分钟改成 1 分钟）'),
+  groupWakeIdleMs: Schema.number()
+    .default(5000)
+    .description(
+      '保活窗的续期门槛，单位毫秒（0 = 关闭，退回「窗内每句都续期」）。窗里说话跟上一条隔得比这更久，窗就当场关掉——连着聊才续，一停顿就散场，2026-10-25 姐姐定的',
+    ),
   groupRepliesPerWindow: Schema.number()
     .default(0)
     .description(
@@ -89,6 +99,27 @@ export const ConfigSchema = Schema.object({
     .description(
       '群里两次回复之间至少隔多久，单位毫秒（默认 20000，0 = 不限）。间隔内的消息不丢，攒进 backlog，下一次回复时一起看见 —— 这就是「均匀地回应几次」的实现方式',
     ),
+  // ── 群聊「非 @ 叫醒」（2026-10-25 姐姐提的：只会跟 @ 的人回复太死板）──
+  // 判定逻辑在 src/wake-trigger.js，学自 qq-bridge 的 evaluateWakeTriggerV2。
+  // 发布默认保守：叫名字、被问话都听得见（这两样不会乱插话），关键词表留空、概率关着。
+  // 想让它在群里活络一点，把 groupWakeKeywords 填上、groupWakeProbability 开成 0.05 就行。
+  groupWakeNameMention: Schema.boolean()
+    .default(true)
+    .description('群里叫鲸鲸的名字（含 groupWakeNames 里的别名）就算在叫它，不用 @'),
+  groupWakeQuestion: Schema.boolean()
+    .default(true)
+    .description('明显在问它（「你行不行」「在不在」「理我」这类）就算在叫它，不用 @'),
+  groupWakeKeywords: Schema.array(Schema.string())
+    .default([])
+    .description('自定义关键词，消息里出现就算在叫它（如 白毛、DS）。短英文自动按词边界匹配，不会误伤 ADS'),
+  groupWakeProbability: Schema.number()
+    .default(0)
+    .description(
+      '没人叫它时，每条群消息有这么大的比例顺带看一眼（0 = 关闭；这种唤醒允许它看完不说话）',
+    ),
+  groupWakeNames: Schema.array(Schema.string())
+    .default([])
+    .description('额外的称呼，除了 QQ 昵称以外还算作叫它（如 大肥鱼、鲸鲸、鲸鱼娘）'),
   replyToPrivate: Schema.boolean()
     .default(true)
     .description('是否响应私聊'),
@@ -183,6 +214,12 @@ export const ConfigSchema = Schema.object({
   rateLimitPerMin: Schema.number()
     .default(12)
     .description('每个会话每分钟最多发几条（0 = 关闭）。QQ 对高频回复很敏感，被限流甚至被封往往不是因为说了什么，而是因为回得太多'),
+  auditOutbound: Schema.boolean()
+    .default(true)
+    .description('外发前审计：回复里带本机路径（C:\\…、/home/…）或凭据特征（sk-…、ghp_…、Bearer …）就整条拦下不发，只记日志'),
+  auditExtraPatterns: Schema.array(Schema.string())
+    .default([])
+    .description('额外要拦的正则（字符串形式），命中同样整条不发；配错的正则会跳过'),
   groupMinGapMs: Schema.number()
     .default(4000)
     .description('群聊里两条回复之间至少隔多久，单位毫秒（0 = 不限制）。群里连着追问时，隔开一点比一口气说完安全得多'),

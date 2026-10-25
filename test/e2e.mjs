@@ -240,6 +240,36 @@ assert.equal(Number(sentGroup.params.group_id), 88888)
 assert.ok(!JSON.stringify(sentGroup.params.message).includes('CQ:at'), '不该把 CQ 码原样发出去')
 console.log('✓ assistant/message → send_group_msg（未泄漏 CQ 码）')
 
+// 外发审计：带本机路径 / 凭据的回复整条不发——
+// 群里顺嘴把 D:\... 念出去，等于把家里的门牌号念给陌生人听。
+{
+  const before = mock.calls.filter((c) => c.action === 'send_group_msg').length
+  ctx.emit('session/event', groupAgent.session, {
+    type: 'assistant/message',
+    data: {
+      turn: 2,
+      step: 1,
+      message: { content: [{ type: 'text', text: '文件就在 D:\\鲸鲸的专用文件\\本地记忆区 里' }] },
+    },
+  })
+  await sleep(150)
+  const after = mock.calls.filter((c) => c.action === 'send_group_msg').length
+  assert.equal(after, before, '带本机路径的回复不该发出去')
+
+  ctx.emit('session/event', groupAgent.session, {
+    type: 'assistant/message',
+    data: {
+      turn: 2,
+      step: 2,
+      message: { content: [{ type: 'text', text: 'api_key: sk-abcdefghijklmnopqrstuvwx' }] },
+    },
+  })
+  await sleep(150)
+  const afterSecret = mock.calls.filter((c) => c.action === 'send_group_msg').length
+  assert.equal(afterSecret, before, '带凭据特征的回复不该发出去')
+}
+console.log('✓ 外发审计：带本机路径 / 凭据的回复整条拦下')
+
 // 自己发出去的话要回写进群历史，并标成「你（昵称）」——
 // 不然它下一轮看不见自己说过什么，会把别人的话认领成自己的。
 mock.emitEvent({
@@ -406,6 +436,49 @@ const totalAfter = created.reduce((n, a) => n + a.received.length, 0)
 assert.equal(totalAfter, totalBefore, '没 @ 也没在保活期，主人说话也不该投递')
 console.log('✓ 没 @ 就不接，主人也不例外')
 
+// —— 没 @ 但叫了名字 / 点名提问：算在叫它（2026-10-25，学 qq-bridge 的 evaluateWakeTriggerV2）——
+config.groupWakeNames = ['大肥鱼', '鲸鲸']
+config.groupWakeQuestion = true
+config.groupWakeProbability = 0
+const countAll = () => created.reduce((n, a) => n + a.received.length, 0)
+
+const beforeName = countAll()
+mock.emitGroupText({
+  groupId: 88895,
+  userId: 69099923,
+  nickname: '路人乙',
+  text: '大肥鱼，这白毛是谁',
+  messageId: 309,
+})
+await waitFor(() => countAll() > beforeName, { what: '群里叫名字入站' })
+const nameMsg = created.flatMap((a) => a.received).at(-1)
+assert.doesNotMatch(textOf(nameMsg), /\[SILENT\]/, '被叫名字必须回，不给沉默出口')
+console.log('✓ 群里叫名字，没 @ 也接')
+
+const beforeQuestion = countAll()
+mock.emitGroupText({
+  groupId: 88896,
+  userId: 69099924,
+  nickname: '路人丙',
+  text: '你行不行啊',
+  messageId: 310,
+})
+await waitFor(() => countAll() > beforeQuestion, { what: '群里点名提问入站' })
+console.log('✓ 群里点名问它，没 @ 也接')
+
+// 纯闲聊不能唤醒：这条是最容易翻车的——叫醒条件一松，群就变成「每句都接」
+const beforeChat = countAll()
+mock.emitGroupText({
+  groupId: 88897,
+  userId: 69099925,
+  nickname: '路人丁',
+  text: '今天天气不错',
+  messageId: 311,
+})
+await sleep(500)
+assert.equal(countAll(), beforeChat, '纯闲聊不该唤醒')
+console.log('✓ 纯闲聊不唤醒')
+
 // —— 均匀回应：两条回复至少隔一段，间隔里的消息攒起来下次一起看见 ——
 // （2026-10-24：「每窗口最多回 N 次」跟「窗口内说话续期」打架，换成间隔来做「均匀」）
 config.groupReplyGapMs = 1500
@@ -428,6 +501,41 @@ assert.match(batched, /过一会儿再说/, '间隔到了应该回最新这句')
 assert.match(batched, /紧跟着一句/, '间隔里攒下的那句也要补进上下文，不能丢')
 config.groupReplyGapMs = 0
 console.log('✓ 均匀回应：间隔内的消息攒起来，下次一起看见')
+
+// —— 攒住的话到点自己补回来（不靠下一句触发）——
+// 2026-10-25 实况：群里 @ 回过一句，第二句在 20 秒内被压进 backlog，
+// 姐姐不再开口 —— 就永远没动静。「保活没成功」其实是这句被吞了。
+config.groupReplyGapMs = 1500
+const beforeCount = created.length
+mock.emitGroupText({ groupId: 88891, userId: 778, nickname: '路人乙', text: '@机器人 在吗', messageId: 511, atSelf: true })
+await waitFor(() => created.length > beforeCount, { what: '开窗' })
+const agent4 = created[created.length - 1]
+const afterIn = agent4.received.length
+mock.emitGroupText({ groupId: 88891, userId: 778, nickname: '路人乙', text: '那说个事', messageId: 512 })
+await sleep(400)
+assert.equal(agent4.received.length, afterIn, '间隔内的消息先攒着，不立刻投递')
+await waitFor(() => agent4.received.length === afterIn + 1, { what: '到点自己补回', timeout: 4000 })
+assert.match(textOf(agent4.received[afterIn]), /那说个事/, '被压住的那句应该自己补回来，不用等下一句')
+config.groupReplyGapMs = 0
+console.log('✓ 被间隔压住的消息到点自己补回（不靠下一句）')
+
+// —— 保活窗「停太久就关」：连着聊才续（2026-10-25 姐姐定）——
+// 窗里说话跟上一条隔得比 groupWakeIdleMs 久，窗就当场关 —— 不然群友隔几十秒插一句也一直续着。
+config.groupWakeIdleMs = 300
+const beforeIdle = created.length
+mock.emitGroupText({ groupId: 88892, userId: 779, nickname: '路人丙', text: '@机器人 说个话', messageId: 521, atSelf: true })
+await waitFor(() => created.length > beforeIdle, { what: '开窗' })
+const agent5 = created[created.length - 1]
+const inChat = agent5.received.length
+mock.emitGroupText({ groupId: 88892, userId: 779, nickname: '路人丙', text: '接着一句', messageId: 522 })
+await waitFor(() => agent5.received.length === inChat + 1, { what: '连着聊要接' })
+const beforeIdle2 = agent5.received.length
+await sleep(600) // 超过 300ms 门槛
+mock.emitGroupText({ groupId: 88892, userId: 779, nickname: '路人丙', text: '隔了半天又来', messageId: 523 })
+await sleep(400)
+assert.equal(agent5.received.length, beforeIdle2, '停太久之后窗该关，这句不该接')
+config.groupWakeIdleMs = 5000
+console.log('✓ 保活窗停太久自动关（连着聊才续）')
 
 // —— 跳过的群消息也要进上下文（2026-10-24 群里实测踩的坑）——
 // 群友 A 说了个梗没 @ 我们 → 跳过；两分钟后主人接一句同款的话，

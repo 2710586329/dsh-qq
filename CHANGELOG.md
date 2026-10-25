@@ -2,6 +2,23 @@
 
 本文件记录 dsh-qq 的版本变更。格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号照 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.1.1] - 2026-10-26
+
+### 新增
+
+- **群里不 @ 也叫得应**（`groupWakeNameMention` / `groupWakeQuestion` 默认开，`groupWakeNames` / `groupWakeKeywords` 默认空）：以前群聊只认 `@`，群里叫它名字、催一句「在不在」，全装没听见。现在叫名字（含 `groupWakeNames` 里的别名）、点名提问、关键词命中都算在叫它，跟 `@` 一样接、一样必须回。判定逻辑在 `src/wake-trigger.js`，学自 qq-bridge 的 `evaluateWakeTriggerV2`——名字和关键词只匹配本条消息自己的文字（引用里的旧原文不算），短英文关键词按词边界匹配（`DS` 不会误伤 `ADS`/`BDSM`）。
+- **概率唤醒**（`groupWakeProbability`，默认 0 = 关）：没人叫它时，每条群消息有这么大的比例顺带看一眼。这种「路过」允许它看完不说话（`[SILENT]`），不会逼它硬接。
+
+### 修复
+
+- **睡前提醒会因为「没有会话」整条丢掉**：`tick` 里的提醒是遍历内存里的现有会话发的，而会话是有人说话才建的。刚重启过、到点时正好没人说话，`manager.list()` 是空的，循环一次都不进，当天的提醒就白丢了（不是被吞，是根本没有能发的对象）。现在补了一条「错过就补」：23:30 之后第一次有人说话时，顺带把「该睡了」塞进这一轮的提示词里，不额外多开一轮；群里不催、进了休息时段（`sleepFrom`）也不补。
+
+- **桌面版 / DSH 0.2.x 上装不上、设置页不显示**（[#1](https://github.com/2710586329/dsh-qq/issues/1)）：`package.json` 的 `dsh.client.inject` 里写了 `@deepseek-ai/dsh-client-runtime`，而那个包在 0.2.x 时代已经废弃（npm 上最后一个是 `0.1.1-rc.2`）。inject 里挂一个解析不到的包，整个 client bundle 会被**静默跳过**——宿主那一半照常跑，浏览器那一半根本不上场。现在注入的是官方 0.2.1 插件自己用的 `@deepseek-ai/dsh-api-remotes`，同时 `client.js` 取槽服务改成跟官方一致的 `ctx.slots` 优先（`ctx.get('slots')` 只留作旧版兜底）。
+
+### 已知限制
+
+- **桌面版 0.2.x 上「设置 → QQ」这一页可能仍然不显示**：宿主半端（工具、QQ 连接、收发消息）完全正常，只是浏览器那一半还没对齐新版设置槽的 API，这一版先把「装的时候报错」去掉，设置页会在后续版本补回。这期间要改配置，直接编辑 `$DSH_HOME/dsh-qq/settings.json`（改完 800ms 内自动生效，见 1.1.0 的说明）。
+
 ## [1.1.0] - 2026-10-25
 
 ### 新增

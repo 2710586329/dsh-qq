@@ -143,6 +143,33 @@ export function createSleep({ config, manager, logger }) {
     return true
   }
 
+  /**
+   * ⭐ 2026-10-25：到点提醒会「整个跳过」的补刀。
+   *
+   * tick 里的睡前提醒是**遍历内存里的现有会话**发的，而会话是有人说话才建的。
+   * 所以只要提醒那一刻内存里一个会话都没有（最常见的就是刚重启过），
+   * `for (const record of manager.list())` 空转一圈，今天的提醒就白丢了——
+   * 23:30 没提醒 ≠ 提醒被吞，是根本没对象可发。
+   *
+   * 这里改成「等人真说话了再补一句」：返回一段提示词前缀，让这一轮的回复
+   * 顺带把话说了，不额外多开一轮。
+   */
+  function takeLateBedtime(record, now = new Date()) {
+    if (!enabled() || !record?.sessionId) return ''
+    if (record.scope === 'group') return '' // 群里不催睡
+    const bed = bedtimeAt()
+    if (bed === null) return ''
+    if (inSleepWindow(now)) return '' // 已经进休息时段了，别半夜说「该睡了」
+    const cur = minutesOf(now)
+    if (cur <= bed) return '' // 还没到点
+    const st = stateOf(record)
+    const dk = dayKey(now)
+    if (st.remindedOn === dk) return ''
+    st.remindedOn = dk
+    logger.info?.(`[dsh-qq] ${record.label} 补一句睡前提醒（错过了 ${hmText(bed)} 那个点）`)
+    return `[提醒] 已经 ${hmText(cur)} 了，${hmText(bed)} 就该睡了。回她的时候顺口催一句早点休息，一句就够，别说教。`
+  }
+
   function forget(record) {
     if (!record?.sessionId) return
     states.delete(record.sessionId)
@@ -239,5 +266,5 @@ export function createSleep({ config, manager, logger }) {
     states.clear()
   }
 
-  return { start, stop, tick, shouldHold, hold, noteText, forget, inSleepWindow, isHolding }
+  return { start, stop, tick, shouldHold, hold, noteText, takeLateBedtime, forget, inSleepWindow, isHolding }
 }

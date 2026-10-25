@@ -6,12 +6,20 @@
  * 角色本人（叫什么、什么性格、怎么称呼对方、爱吃什么）一律由 `persona` 配置提供：
  * 留空就是一只没有名字、说话正常的普通助手，不会硬塞某个人的私人设定。
  *
- * 拼装顺序（越靠后越容易被遵守）：
- *   persona（我是谁）
- *   → 内置聊天规矩（怎么说话）
- *   → ownerRules（谁是自己人：群聊标主人、私聊对面就是主人；只在配了 ownerIds 时追加）
- *   → directPrompt / groupPrompt（用户自己的补充/覆盖）
+ * ── 两层边界（2026-10-25 重排）────────────────────────────────────────────
+ * ① **协议层**（内置，不受人设影响）：怎么用工具、怎么参与聊天、怎么收着说。
+ *    GROUP_RULES / PRIVATE_RULES、BUILTIN_RULES、TIME_RULES、ATTITUDE_RULES、
+ *    HANDOFF_RULE、IDENTITY_RULES、PEER_BOT_RULES、ownerRules。
+ *    人设里就算写了别的规矩，也盖不掉这里的硬规矩。
+ * ② **人设层**（`config.persona`）：我是谁、什么脾气、怎么称呼人。可以热改、保存即生效。
+ *    规矩：人设只写人设，不写工具用法——工具名会变，性格不该跟着变。
+ *    `personaLeaks()` 会检测这类混入，只报警不阻止。
+ *
+ * 拼装顺序（越靠后越不容易被冲淡）：
+ *   协议层 → 事实卡 → groupPrompt/directPrompt → 人设层（persona + SELF_KNOWN_RULE）
+ *   → 表情包（最最后，它最容易变成「每句都配图」）
  */
+import { renderGijinka } from './gijinka.js'
 
 /** 内置：聊天通用规矩，不绑任何角色。 */
 export const BUILTIN_RULES = `你正在用 QQ 跟人聊天，不是在写代码，也不是在交工作报告。
@@ -152,6 +160,42 @@ export function ownerRules(label = '主人', { isGroup = true } = {}) {
 }
 
 /**
+ * 人设层里不该出现的「工具名 / 协议标记」。
+ *
+ * 这些是行为层的活。人设里钉死一个工具名，等于把某代协议写进性格：
+ * 哪天工具改名、或者换个宿主，这段就成了错的指引，还会跟行为层打架。
+ * 只检测、只报警，不阻止——怎么写是人家的自由，但日志里得留痕。
+ */
+const TOOL_TOKENS = [
+  'qq_reply',
+  'qq_send',
+  'qq_send_image',
+  'qq_send_file',
+  'qq_mface',
+  'qq_face',
+  'qq_faces',
+  'qq_keep_face',
+  'qq_poke',
+  'qq_react',
+  'qq_like',
+  'qq_recall',
+  'qq_facts',
+  'read_image',
+  '[SILENT]',
+  'SILENT_MARKER',
+]
+
+/**
+ * 检查人设层有没有混进工具用法。
+ * @returns {{ ok: boolean, hits: string[] }}
+ */
+export function personaLeaks(persona) {
+  const text = String(persona ?? '')
+  const hits = TOOL_TOKENS.filter((t) => text.includes(t))
+  return { ok: hits.length === 0, hits }
+}
+
+/**
  * 组装这一条消息前面的系统指令。
  *
  * @param {object} config 插件配置
@@ -164,15 +208,16 @@ export function buildChatPrompt(config, { isGroup, isOwner = false, faces = null
   const owners = Array.isArray(config?.ownerIds) ? config.ownerIds.map(String).filter(Boolean) : []
   const parts = []
 
-  if (persona) parts.push(persona, '')
+  // ① 协议层：怎么用工具、怎么参与聊天、怎么收着说。跟「你是谁」无关。
+  //    这一层内置、不受人设影响——人设里就算写了别的规矩，也盖不掉这里的硬规矩。
   parts.push(isGroup ? GROUP_RULES : PRIVATE_RULES, '', BUILTIN_RULES, '', TIME_RULES, '', ATTITUDE_RULES)
   // 只私聊加交接：群聊换会话的交接价值低，别多占 token。
   if (!isGroup) parts.push('', HANDOFF_RULE)
-  // 放在 persona 之后、占位规矩段：配了人设就以人设为「我」，没配才用匿名兜底。
-  parts.push('', persona ? SELF_KNOWN_RULE : ANON_RULE)
   if (isGroup) parts.push('', IDENTITY_RULES)
   if (isGroup && config?.botChatEnabled) parts.push('', PEER_BOT_RULES)
   if (owners.length > 0 && (isGroup || isOwner)) parts.push('', ownerRules(config?.ownerLabel, { isGroup }))
+
+  // 事实卡：跟协议无关，但它比人设更「事」，所以放在协议之后、人设之前。
   const factText = String(facts ?? '').trim()
   if (factText) {
     parts.push(
@@ -183,7 +228,23 @@ export function buildChatPrompt(config, { isGroup, isOwner = false, faces = null
       `这些是跟她聊天时要记住的事，不用念出来、不用复述。她说「记一下」才改卡：用 write 工具改 \`${String(factsFile || '').trim() || '事实卡.md'}\` 里对应那节，一次只加一行，别自己删改别的内容。`,
     )
   }
+
+  // AI 娘图鉴：跟事实卡同一类「事」——群友说的那个名字指的是谁。
+  //    它是跨群共享的常识，不跟某个会话绑定，所以内置在插件里、由 aiGirls 开关控制。
+  if (config?.aiGirls !== false) {
+    const gijinkaText = renderGijinka()
+    if (gijinkaText) parts.push('', gijinkaText)
+  }
+
+  // 用户自己的补充（groupPrompt / directPrompt）：介于两层之间，可以改行为也可以补人设。
   if (extra) parts.push('', extra)
+
+  // ② 人设层：我是谁、什么脾气、怎么称呼人。紧贴最后——
+  //    一是「上面那段『我是谁』」的指代要清楚（以前它隔了五段，模型常常找不到）；
+  //    二是越靠后越不容易被前面一大坨协议冲淡。
+  if (persona) parts.push('', persona, SELF_KNOWN_RULE)
+  else parts.push('', ANON_RULE)
+
   // 放最后：越靠后越不容易被忽略，表情包这块最容易变成「每句都配图」
   if (faces) parts.push('', faceStrategyRule(config, faces))
 
