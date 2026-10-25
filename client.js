@@ -373,6 +373,35 @@ window.__ModuleLoader__.load({
           boolField('botChatEnabled', '允许它和同类聊天 / 回怼', '默认关：同类说啥都不理，连 @ 也不接。打开之后才会顶嘴——被骂了先看是不是在说它自己。'),
           listField('peerBots', '同类机器人的 QQ 号', { hint: '填了才认得出「这句是别的机器人发的」。' })),
 
+        /* ── 主动说话 ── */
+        h('div', { 'data-qq-sec': '' },
+          h('div', { 'data-qq-h': '' }, '主动说话（冷场时给一次开口的机会）'),
+          boolField('proactiveEnabled', '安静久了允许它主动说一句', '默认开。打开后，会话安静到「安静多久」那个时长，给它一次主动开口的机会——说不说自己判断，不想说就零成本跳过。'),
+          textField('proactiveSilentMs', '安静多久之后给机会（毫秒）', {
+            hint: '默认 1200000（20 分钟）。说完一句话会重新计时，不会隔几分钟又问一遍。',
+            type: 'number',
+          }),
+          textField('proactiveMaxPerDay', '每天最多主动几次', { hint: '默认 6。连着 3 次没人接就当天闭嘴。', type: 'number' }),
+          textField('proactiveQuietHours', '静默时段（这期间不主动）', {
+            hint: '默认 23:00-08:00。格式「开始-结束」，24 小时制。',
+            mono: true,
+          }),
+          textField('mergeWindowMs', '连发合并窗口（毫秒）', {
+            hint: '默认 5000。同一个人一口气发三条，等这么一会儿并成一轮再回，别回三遍。只在私聊生效。',
+            type: 'number',
+          })),
+
+        /* ── 作息 ── */
+        h('div', { 'data-qq-sec': '' },
+          h('div', { 'data-qq-h': '' }, '作息（几点犯困、几点睡）'),
+          boolField('sleepMode', '启用作息', '关掉 = 它不分白天黑夜，什么时候都正常回。'),
+          textField('bedtimeAt', '几点提醒它去睡', { hint: '默认 23:30。每个会话每天只提醒一次。', mono: true }),
+          textField('sleepFrom', '夜里从几点开始不按住消息', {
+            hint: '默认 00:00。这段里收到的私聊先攒着，出时段时一次性交出去（附「昨晚你发来这几条」）。',
+            mono: true,
+          }),
+          textField('sleepTo', '攒到几点交出去', { hint: '默认 08:00。', mono: true })),
+
         /* ── 其它 ── */
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '其它'),

@@ -1,4 +1,4 @@
-# dsh-qq
+# dsh-qq-onebot
 
 把 **QQ** 接成 DeepSeek Harness 的一个前端：私聊、群聊都能和同一个 Agent 聊；语音听得懂、图片看得见，还能戳一戳、贴表情、点赞。
 
@@ -12,7 +12,7 @@
 ```
 你的 QQ 客户端  ←→  NapCat（协议端，注入 QQ）
                         ↕  OneBot v11 WebSocket
-                dsh-qq 插件（跑在 DSH 宿主进程里）
+                dsh-qq-onebot 插件（跑在 DSH 宿主进程里）
                         ↕  进程内 ctx.agents
                   你的 Agent（你自己的预设、工具、记忆）
 ```
@@ -48,21 +48,24 @@
 **先把 DSH 完全退出**（托盘也要退掉，插件文件被占用会装到一半失败）。
 
 ```powershell
-# 从 Releases 下载 dsh-qq-0.7.2.tgz，然后
-dsh plugin --profile desktop add "D:\下载\dsh-qq-0.7.2.tgz"
+# 从 npm 装（推荐）
+dsh plugin --profile desktop add dsh-qq-onebot
+
+# 或从 Releases 下载 dsh-qq-onebot-1.0.0.tgz
+dsh plugin --profile desktop add "D:\下载\dsh-qq-onebot-1.0.0.tgz"
 ```
 
 不想用打好的包，也可以直接装源码目录（`git clone`，或下 `Source code (zip)` 解压）：
 
 ```powershell
-dsh plugin --profile desktop add "D:\dsh-qq-0.7.2"
+dsh plugin --profile desktop add "D:\dsh-qq-onebot-1.0.0"
 ```
 
 三个容易踩的坑：
 
 - **必须用 DSH 自带的 `dsh`，不能 `npx @deepseek-ai/dsh`。** `desktop` 这份 profile 由桌面端独占管理，npx 会直接报 `profile "desktop" is managed exclusively by the Electron application`。PATH 里找不到 `dsh` 就用完整路径：
   ```powershell
-  & "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add "D:\dsh-qq-0.7.1"
+  & "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add "D:\dsh-qq-onebot-1.0.0"
   ```
 - **`--profile` 不能省**，省了直接报 `error: --profile <name> is required`。
 - **写绝对路径**，相对路径是按你敲命令那一刻的当前目录算的。
@@ -70,7 +73,7 @@ dsh plugin --profile desktop add "D:\dsh-qq-0.7.2"
 装完它会自动写进 `$DSH_HOME/profiles/desktop/package.json` 的 `dsh.profile.bundles`（默认就启用），启动后在 **设置 → 插件** 里能看到。想确认装没装上：
 
 ```powershell
-dsh plugin --profile desktop why dsh-qq
+dsh plugin --profile desktop why dsh-qq-onebot
 ```
 
 ### 3. 重启 DSH，填连接信息
@@ -161,7 +164,7 @@ NapCat 的 **WS 和 HTTP 是两个不同的 token**，填错不报错，只是�
 默认 `isolateByPeer: true`：私聊在 `<workspaceRoot>/会话/私聊_<QQ号>/`，群在 `群_<群号>/`，第一次用自动铺好 `AGENTS.md` + `记忆区/`。想共用宿主目录就设 `false`。
 
 **能不能群发 / 主动推消息**
-这个版本不做主动推送，只回收到的消息。想主动说话，用定时任务在那之前先给它发一条。
+不做群发。**冷场时会主动开口**：会话安静满 `proactiveSilentMs`（默认 20 分钟）之后，它有机会自己说一句，说不说由它判断（不想说就 `[SILENT]`）。有静默时段、每天次数上限、以及「连着几次没人接就闭嘴」三道闸，见 [配置项](docs/configuration.md#没人说话的时候主动开口)。想定时定点让它说话，就在 DSH 里给它挂个定时任务。
 
 ## 装之前
 

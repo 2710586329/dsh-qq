@@ -1,4 +1,4 @@
-# 把当天的 QQ 聊天记录交给 headless 会话，写成日记。
+﻿# 把当天的 QQ 聊天记录交给 headless 会话，写成日记。
 #
 # 配合 diary-prompt.md 一起用；建议挂成 Windows 计划任务，每晚跑一次。
 # 注册方法（管理员 PowerShell，改时间就改 /st）：
@@ -25,6 +25,16 @@ $cfgFile = Join-Path $PSScriptRoot 'qqbot.config.ps1'
 if (Test-Path $cfgFile) { . $cfgFile }
 
 $root = $cfg.DataRoot
+if (-not $root) {
+  # 往上找带 QQ会话 的那一级。不能写死「往上两级」—— 这个仓库可能埋在 插件\ 之类的
+  # 子目录里，写死会把数据根算成 ...\插件，headless 的沙箱就只覆盖到那儿，日记写不进去。
+  $probe = $PSScriptRoot
+  for ($i = 0; $i -lt 6; $i++) {
+    $probe = Split-Path -Parent $probe
+    if (-not $probe) { break }
+    if (Test-Path (Join-Path $probe 'QQ会话')) { $root = $probe; break }
+  }
+}
 if (-not $root) { $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
 if (-not $root -or -not (Test-Path $root)) { $root = $PSScriptRoot }
 

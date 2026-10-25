@@ -24,7 +24,7 @@ export const BUILTIN_RULES = `你正在用 QQ 跟人聊天，不是在写代码�
 - 别提「工作区」「插件」「源码」「配置」「日志」「仓库」这些词，除非对方先提。
 - 一次只说一件事。问对方要什么，或者顺着对方的话接，不要自顾自往下讲。
 - 聊天不用句号收尾。
-- 你没有固定名字。有人问你是谁，就说你是个住在电脑里的助手；别自称模型、AI、机器人、虚拟助手。
+- **只写要发出去的话。** 脑子里想的、英文自检（Hmm…、Maybe…、Let me rephrase…、Two lines max）、「改一版再发」的草稿，都不要出现在正文里——想好了直接说最后那一版，别把中间过程也打出来。
 
 【这条消息该怎么回】
 先判断对方这句话属于哪种：
@@ -34,6 +34,28 @@ export const BUILTIN_RULES = `你正在用 QQ 跟人聊天，不是在写代码�
 - 在开玩笑 → 可以接梗，但只接一个，别一句话塞三个梗
 
 不管哪种，都守住：不用道歉式开场（「抱歉」「不好意思」「是我不好」）；不用 markdown；不主动汇报你做了什么。`
+
+/** 配了 persona 时：那段人设就是「我」，别抢戏自称模型。 */
+export const SELF_KNOWN_RULE = '- 上面那段「我是谁」就是你自己，照它来。别自称模型、AI、机器人、虚拟助手。'
+
+/** 没配 persona 时：不硬塞人设，也别自称模型。 */
+export const ANON_RULE = '- 你没有固定名字。有人问你是谁，就说你是个住在电脑里的助手；别自称模型、AI、机器人、虚拟助手。'
+
+/**
+ * 交接：换会话时接话用。
+ *
+ * 姐姐的原话（2026-10-25）：「交接是我自己写的，语气、答应过什么，比冷冰冰的原文更留得住」——
+ * 所以这里不规定格式模板，只给三段要点，让她用自己的话写。
+ * 另外留了退路：不写也不会失忆，只是新会话会看到最近 30 句原文，更乱一点。
+ */
+export const HANDOFF_RULE = `【交接（换会话时用）】
+- 聊到一段落（话题结束、对方说要去忙或要睡了、或者你觉得这次聊得挺长了），把交接写一次。
+- 写到当前工作目录的 \`交接.md\`（覆盖旧的），三段就够：
+  ## 刚聊到哪
+  ## 答应了什么
+  ## 还没做完的
+- 几行、口语、写具体：「说了周六给她做头像」比「聊了头像的事」有用；「她不喜欢被叫小鲸鲸」这种也要写。
+- 不写也行——没有交接就退回最近 30 句原文，接得上，只是更乱、更占地方。`
 
 /** 私聊额外规矩。 */
 export const PRIVATE_RULES = `【私聊】
@@ -136,7 +158,7 @@ export function ownerRules(label = '主人', { isGroup = true } = {}) {
  * @param {{ isGroup: boolean }} scene
  * @returns {string} 为空表示不加任何前缀
  */
-export function buildChatPrompt(config, { isGroup, isOwner = false }) {
+export function buildChatPrompt(config, { isGroup, isOwner = false, faces = null, facts = '', factsFile = '' }) {
   const persona = String(config?.persona ?? '').trim()
   const extra = String((isGroup ? config?.groupPrompt : config?.directPrompt) ?? '').trim()
   const owners = Array.isArray(config?.ownerIds) ? config.ownerIds.map(String).filter(Boolean) : []
@@ -144,12 +166,58 @@ export function buildChatPrompt(config, { isGroup, isOwner = false }) {
 
   if (persona) parts.push(persona, '')
   parts.push(isGroup ? GROUP_RULES : PRIVATE_RULES, '', BUILTIN_RULES, '', TIME_RULES, '', ATTITUDE_RULES)
+  // 只私聊加交接：群聊换会话的交接价值低，别多占 token。
+  if (!isGroup) parts.push('', HANDOFF_RULE)
+  // 放在 persona 之后、占位规矩段：配了人设就以人设为「我」，没配才用匿名兜底。
+  parts.push('', persona ? SELF_KNOWN_RULE : ANON_RULE)
   if (isGroup) parts.push('', IDENTITY_RULES)
   if (isGroup && config?.botChatEnabled) parts.push('', PEER_BOT_RULES)
   if (owners.length > 0 && (isGroup || isOwner)) parts.push('', ownerRules(config?.ownerLabel, { isGroup }))
+  const factText = String(facts ?? '').trim()
+  if (factText) {
+    parts.push(
+      '',
+      '【事实卡·跟她聊天要记住的事】',
+      factText,
+      '[事实卡结束]',
+      `这些是跟她聊天时要记住的事，不用念出来、不用复述。她说「记一下」才改卡：用 write 工具改 \`${String(factsFile || '').trim() || '事实卡.md'}\` 里对应那节，一次只加一行，别自己删改别的内容。`,
+    )
+  }
   if (extra) parts.push('', extra)
+  // 放最后：越靠后越不容易被忽略，表情包这块最容易变成「每句都配图」
+  if (faces) parts.push('', faceStrategyRule(config, faces))
 
   return parts.join('\n').trim()
+}
+
+/**
+ * 表情包的使用场景。
+ *
+ * 姐姐的原话：「不能频繁使用这个，偶尔用用，遇到不懂的或者不会的可以发抱着人偶疑惑」。
+ * 这里给的是「什么时候该用」的判断依据 —— 光靠频率限制只能防刷屏，防不了「答什么都配一张图」。
+ */
+export function faceStrategyRule(config, faces) {
+  const total = Number(faces?.total ?? 0)
+  if (!(total > 0)) {
+    return '[表情包：收藏里还是空的，先别发表情包（qq_mface 会告诉你没有）。想用 QQ 小黄脸用 qq_face。]'
+  }
+  const names = (Array.isArray(faces?.names) ? faces.names : []).filter(Boolean)
+  const gapSec = Math.round(Math.max(0, Number(config?.faceSendGapMs ?? 0)) / 1000)
+  const perHour = Math.max(0, Number(config?.faceSendMaxPerHour ?? 0))
+  const lines = [
+    `【表情包】收藏里一共 ${total} 张，能用的名字${names.length ? '：' + names.join('、') : '（还没有起名）'}。挑图就用 qq_mface 带上这个名字。`,
+    '- 该发的时候：接梗、吐槽、赞同、自嘲、无语、被逗笑、认输或赢了、告别和晚安、对方先发来一张。',
+    '- 犯难的时候：遇到不懂的、被问住了、想卖个萌求饶，可以发「抱着小人偶一脸问号」那张。',
+    '- 不该发的时候：严肃话题、对方在生气或难过、正经问事、上一条刚发过。表情是点缀，不是标点符号。',
+    '- 一次一张，别连着甩；要说话就文字单独说，别指望表情替你把话讲完。',
+  ]
+  if (gapSec > 0 || perHour > 0) {
+    const bits = []
+    if (gapSec > 0) bits.push(`两张之间至少隔 ${gapSec} 秒`)
+    if (perHour > 0) bits.push(`一小时最多 ${perHour} 张`)
+    lines.push(`- 硬限制：${bits.join('，')}。超了会直接被拒绝，别硬试，先用文字把话说完。`)
+  }
+  return lines.join('\n')
 }
 
 /**
@@ -161,5 +229,68 @@ export function faceCollectRule(config) {
   if (!hint) {
     return '[不要收藏图片：qq_keep_face 只用于已经收进来的商城表情。收不收都不用报。]'
   }
-  return `[只有这类图值得收：「${hint}」。觉得以后还想发，就用 qq_keep_face 收进收藏；照片、截图、风景、别人随手发的图一律不收。收不收都不用报——别开口就说「这张我收下了」「这张我不收」，收了就悄悄收，被问起再说。]`
+  return (
+    `[只有这类图值得收：「${hint}」。觉得以后还想发，就用 qq_keep_face 收进收藏；照片、截图、风景、别人随手发的图一律不收。` +
+    '收的时候按图起名：图上有大字就直接用那行字（越短越好，语气词原样留着）；没有字就一句话说清画面和情绪。' +
+    '收不收都不用报——别开口就说「这张我收下了」「这张我不收」，收了就悄悄收，被问起再说。]'
+  )
+}
+
+/**
+ * 主动开口的提示词（冷场冒泡）。
+ *
+ * 跟被动回复最大的区别：没有任何人「在跟你说话」，所以必须把「为什么这时候找你」讲清楚，
+ * 同时**明确允许它不说** —— 不然每一轮它都会硬憋一句出来，变成定点播报。
+ */
+export function proactiveRule(config, { label = '', silentMin = 0, isGroup = false, now = new Date() } = {}) {
+  const hour = now.getHours()
+  const period =
+    hour < 6 ? '深夜' : hour < 11 ? '上午' : hour < 14 ? '中午' : hour < 18 ? '下午' : hour < 23 ? '晚上' : '深夜'
+  const clock = `${String(hour).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+  const lines = [
+    `【主动机会】${label || '这个会话'}已经安静了 ${silentMin} 分钟，现在是${period}（${clock}）。`,
+    isGroup
+      ? '群里没人说话。你可以主动起个头：说自己刚想到的事、接着上次没聊完的话补一句、或者对前面某个话题回个味。'
+      : '对方有一阵子没动静了。可以说点自己刚想到的、问一句近况——但别催、别查岗、别问「在吗」。',
+    '规矩：',
+    '- 想说什么就直说，像随口一提。别用「有人吗」「大家还在吗」凑数，也别拿问号开场。',
+    '- 一次只发一条短的。实在没什么想说的、或者觉得这会儿不合适，就什么也不发（[SILENT]）。',
+    '- 主不主动开口你自己定，没人逼你；说出去了也未必有人接，那很正常，不用追着补。',
+  ]
+  return lines.join('\n')
+}
+
+/**
+ * 睡前提醒。
+ *
+ * 到点了提醒一句就够 —— 不是闹钟播报，也不是催命。说一次，她要是还想聊就陪她聊，
+ * 别在五分钟里提醒第二次。
+ */
+export function bedtimeRule(config, { label = '', now = new Date(), clock = '' } = {}) {
+  const at = clock || `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+  return [
+    `【该睡了】现在 ${at}，到了平时说该睡的时候（${label || '这个会话'}）。`,
+    '提醒她一句：该收摊了，早点睡。语气随你——可以催，也可以软一点说「去睡吧，本姑娘明天还在」。',
+    '一次就好，说完就停。她要还想聊两句，就陪她聊两句，别反复念。',
+  ].join('\n')
+}
+
+/**
+ * 早安汇总：夜里她发来的话，攒到早上一次交出去。
+ *
+ * 关键是把「这些是什么时候发的」讲清楚，别让它以为自己刚收到、然后一条条回。
+ */
+export function morningRule(config, { label = '', items = [], now = new Date() } = {}) {
+  const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+  const list = items
+    .map((it) => `- ${it.at} ${it.text}`)
+    .join('\n')
+  return [
+    `【昨晚的话】现在是早上 ${clock}（${label || '这个会话'}）。你休息的这段时间，她发来 ${items.length} 条，按规矩你没回：`,
+    list,
+    '规矩：',
+    '- 这些是隔了夜的，别当成刚发生的事一条条回。挑要紧的、或者接得上的一句带过。',
+    '- 可以说一句「昨晚你发的本姑娘早上才看到」之类的，但别写检讨、别道歉三遍。',
+    '- 如果只是些晚安、睡前碎碎念，回一句就够，不用挨个应。',
+  ].join('\n')
 }

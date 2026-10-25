@@ -45,6 +45,31 @@ export function extractText(message) {
 /** 句子边界：中文句号/问号/叹号/省略号，以及换行。 */
 const SENTENCE_END = /^([\s\S]*?[。！？!?…\n])/
 
+/**
+ * 模型偶尔把「想一想再改一版」的过程写进正文（不是 reasoning channel）。
+ * 2026-10-25 15:24 和 15:28 各出现一次，原样发到了 QQ 上。
+ * 这里按「整行像思考」兜底剥掉——只认行首那几个标志词，不碰正常中文。
+ */
+const LEAK_LINE = [
+  /^Hmm\b/i,
+  /^Maybe\b/i,
+  /^Let me\b/i,
+  /^Two lines?\b/i,
+  /^-\s*user asks about\b/i,
+  /^Keep it\./i,
+  /^I (?:should|will|'ll|need to)\b/i,
+]
+
+export function stripLeakedThinking(text) {
+  if (!text) return text
+  const kept = text.split('\n').filter((line) => {
+    const t = line.trim()
+    if (!t) return true
+    return !LEAK_LINE.some((re) => re.test(t))
+  })
+  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
 /** 太短不算一句，避免「嗯。」单独发一条。 */
 const MIN_SENTENCE = 6
 
@@ -55,7 +80,7 @@ const MIN_SENTENCE = 6
  */
 const SELF_SENDING_TOOLS = new Set(['qq_reply', 'qq_send_text', 'qq_send_message'])
 
-export function createOutbound({ manager, config, logger, send }) {
+export function createOutbound({ manager, config, logger, send, wake }) {
   const lastSent = new Map() // sessionId -> 上一条完整文本（去重用）
   const streamBuf = new Map() // sessionId -> 还没发出去的流式尾巴
   const streamCount = new Map() // sessionId -> 本轮已经流式发了几条
@@ -63,6 +88,18 @@ export function createOutbound({ manager, config, logger, send }) {
 
   const streamMax = Number(config.streamMaxChunks ?? 3)
   const streamEnabled = config.streamReply !== false
+
+  /**
+   * 一切往外发的文字都从这儿走。
+   * 顺手告诉 wake「刚有活动」——不然主动说话那层会把「自己刚说完」也当成冷场。
+   */
+  async function emit(record, text) {
+    try {
+      await send(record, text)
+    } finally {
+      wake?.noteOutbound?.(record)
+    }
+  }
 
   function resetStream(sessionId) {
     streamBuf.delete(sessionId)
@@ -95,7 +132,8 @@ export function createOutbound({ manager, config, logger, send }) {
         if (!match) break
         const sentence = match[1].trim()
         if (sentence.length < MIN_SENTENCE) break
-        await send(record, sentence)
+        const clean = stripLeakedThinking(sentence)
+        if (clean) await emit(record, clean)
         buf = buf.slice(match[0].length)
         sent += 1
         streamCount.set(sessionId, sent)
@@ -111,7 +149,7 @@ export function createOutbound({ manager, config, logger, send }) {
         resetStream(sessionId)
         return
       }
-      const text = extractText(data.message)
+      const text = stripLeakedThinking(extractText(data.message))
       if (!text) return
 
       const streamed = streamBuf.get(sessionId) ?? ''
@@ -122,7 +160,7 @@ export function createOutbound({ manager, config, logger, send }) {
         const tail = text.endsWith(streamed.trim())
           ? text.slice(0, text.length - streamed.trim().length).trim()
           : (text.startsWith(streamed.trim()) ? text.slice(streamed.trim().length).trim() : text)
-        if (tail) await send(record, tail)
+        if (tail) await emit(record, tail)
         lastSent.set(sessionId, text)
         return
       }
@@ -134,10 +172,10 @@ export function createOutbound({ manager, config, logger, send }) {
       lastSent.set(sessionId, text)
       if (previous && text.startsWith(previous)) {
         const tail = text.slice(previous.length).trim()
-        if (tail) await send(record, tail)
+        if (tail) await emit(record, tail)
         return
       }
-      await send(record, text)
+      await emit(record, text)
       return
     }
 
@@ -150,7 +188,7 @@ export function createOutbound({ manager, config, logger, send }) {
         const message =
           reason.error?.message || reason.failure?.message || reason.failure?.code || '处理时出错了'
         logger.warn?.(`[dsh-qq] ${record.label} 本轮出错: ${message}`)
-        await send(record, `⚠️ ${message}`)
+        await emit(record, `⚠️ ${message}`)
       }
       return
     }
@@ -159,14 +197,14 @@ export function createOutbound({ manager, config, logger, send }) {
       const name = String(data.name ?? '')
       if (SELF_SENDING_TOOLS.has(name)) selfSent.add(sessionId)
       if (config.showToolResults) {
-        await send(record, `🔧 调用 ${name || 'tool'}`)
+        await emit(record, `🔧 调用 ${name || 'tool'}`)
       }
       return
     }
 
     if (type === 'tool/result' && config.showToolResults) {
       const err = data.error
-      if (err) await send(record, `⚠️ 工具失败: ${err.message ?? err.code ?? err}`)
+      if (err) await emit(record, `⚠️ 工具失败: ${err.message ?? err.code ?? err}`)
       return
     }
   }

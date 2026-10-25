@@ -1,6 +1,6 @@
 # dsh-qq bundle patch
 #
-# 通过 `dsh plugin --profile <name> add dsh-qq` 安装后，dsh 启动时自动加载本 patch。
+# 通过 `dsh plugin --profile <name> add dsh-qq-onebot` 安装后，dsh 启动时自动加载本 patch。
 #
 # 前置：本机需要跑一个 NapCat（或任何 OneBot 11 实现），并开启「正向 WebSocket」服务，
 # 默认地址 ws://127.0.0.1:3001。详见 README.md。

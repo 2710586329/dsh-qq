@@ -12,6 +12,7 @@ node_modules/
 *.tgz
 
 # 日志与临时文件
+logs/
 *.log
 npm-debug.log*
 dsh-qq-debug.log
@@ -26,3 +27,6 @@ Thumbs.db
 # 本地调试脚本（一次性验证用，不进仓库）
 test/tmp-*.mjs
 test/ws-probe.mjs
+
+# 本地快照（发布前备份，不进仓库）
+快照/

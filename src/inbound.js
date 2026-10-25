@@ -1,7 +1,8 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { readMessage } from './onebot/segment.js'
-import { rememberFaces, facesCount } from './faces.js'
+import { rememberFaces, facesCount, facesForPrompt } from './faces.js'
 import { buildChatPrompt, faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT, SILENT_HINT } from './prompts.js'
+import { factsFileFor, loadFactsFor, loadHandoffFor } from './settings.js'
 import { resolvePeerWorkspace } from './workspace.js'
 import { appendChatLog } from './chatlog.js'
 import { mkdir, writeFile, readdir, unlink } from 'node:fs/promises'
@@ -329,7 +330,7 @@ async function pruneCache(cacheDir, keepFiles = 200) {
  *
  * 触发规则全部走配置，插件自己不做「猜你还想聊」这种自作聪明的事。
  */
-export function createInbound({ config, manager, logger, client, send, approval, questions, contextGuard }) {
+export function createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep }) {
   // 没配 imageCacheDir 时落在工作目录下的「图片缓存」；每个会话再各占一层子目录（见下）
   const baseCacheDir =
     String(config.imageCacheDir ?? '').trim() ||
@@ -338,6 +339,57 @@ export function createInbound({ config, manager, logger, client, send, approval,
   // 谁是主人：群聊里用 QQ 号打标，私聊不影响（私聊本来就在白名单里）
   const ownerIds = new Set((Array.isArray(config.ownerIds) ? config.ownerIds : []).map(String))
   const ownerLabel = String(config.ownerLabel ?? '').trim() || '主人'
+
+  // 连发合并：同一个 peer 的几条消息攒在一起回。
+  // 键是「谁发的」，值是正在等的这一批（bodies 是各自已经拼好的正文）。
+  const mergeBatches = new Map()
+
+  /**
+   * 投递一轮。单条消息和「连发合并」后的整段，走的是同一条路。
+   */
+  function runTurn({ record, label, peerId, isGroup, client, body, maxTurnMs }) {
+    const message = createUserMessage({
+      content: [{ type: 'text', text: body }],
+      source: { kind: 'user' },
+    })
+    const startedAt = Date.now()
+
+    manager.enqueue(record, async () => {
+      let timer = null
+      try {
+        // 私聊回一句「正在输入」，让对方知道这边在敲字（群聊没有这个概念，跳过）
+        if (!isGroup && client) {
+          client
+            .call('set_input_status', { user_id: Number(peerId), event_type: 1 }, 5000)
+            .catch(() => {})
+        }
+        record.agent.followup(message)
+
+        const outcome = await Promise.race([
+          Promise.resolve(record.agent.whenIdle?.()).then(() => 'idle'),
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve('timeout'), maxTurnMs)
+          }),
+        ]).finally(() => {
+          if (timer) clearTimeout(timer)
+        })
+
+        if (outcome === 'timeout') {
+          // 只放开队列，不打断 Agent —— 它跑完的回复照样会从 outbound 发出去
+          const seconds = Math.round((Date.now() - startedAt) / 1000)
+          logger.warn(`[dsh-qq] ${label} 本轮已跑 ${seconds}s 仍未结束，先放开队列`)
+          if (typeof send === 'function') {
+            await send(
+              record,
+              `（这轮我还在弄，已经跑了 ${seconds} 秒，你先忙别的，好了我叫你）`,
+            ).catch(() => {})
+          }
+        }
+      } catch (err) {
+        logger.warn?.(`[dsh-qq] 投递给 ${label} 失败:`, err)
+      }
+    })
+  }
 
   return async function onEvent(event) {
     if (event?.post_type !== 'message') return
@@ -469,6 +521,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
     }
 
     let record = await manager.obtain({ scope, peerId, label })
+    // 有人说话了：冷场计时要清零，主动说话那层也知道「这会儿不缺人」
+    wake?.noteInbound?.(record)
 
     // 这个会话自己的缓存目录（隔离模式下一会话一目录；关掉隔离就共用 baseCacheDir）
     const cacheDir = record.dir ? join(record.dir, '图片缓存') : baseCacheDir
@@ -489,9 +543,14 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // ── 斜杠命令不打搅 Agent（全角斜杠「／」、前后空格都认）──
     const cmd = rawText.toLowerCase().replace(/[／]/g, '/').trim()
     if (cmd === '/reset' || cmd === '#reset' || cmd === '/new' || cmd === '#new') {
-      const ok = manager.reset(record)
-      logger.info?.(`[dsh-qq] 收到 /reset（${label}），reset=${ok}`)
-      await send(record, '好，之前聊的我不记得了。重新来过吧。')
+      // ⭐ 2026-10-25 P2：/reset 也带上交接，别让「重新来过」真把刚才聊的忘干净。
+      const handoff = loadHandoffFor(record)
+      const seed = handoff
+        ? ['[上一段会话的交接（你自己写的）——照着接，别当成姐姐刚说的话]', handoff]
+        : null
+      const ok = manager.reset(record, seed)
+      logger.info?.(`[dsh-qq] 收到 /reset（${label}），reset=${ok}，交接=${handoff ? '有' : '无'}`)
+      await send(record, handoff ? '好，刚才聊到哪我记下了。重新来过吧。' : '好，之前聊的我不记得了。重新来过吧。')
       return
     }
     if (cmd === '/status' || cmd === '#status') {
@@ -614,6 +673,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
       if (seed) {
         const prev = record
         record = await manager.obtain({ scope, peerId, label })
+        wake?.forget?.(prev)
+        wake?.noteInbound?.(record)
         record.swapSeed = seed.length > 0 ? seed : null
         // 工具靠这些字段认「给谁回、撤回哪条」，换会话不能丢
         record.lastSenderId = prev.lastSenderId ?? null
@@ -690,12 +751,18 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 聊天规矩（内置中性版 + 可选 persona + directPrompt/groupPrompt）只在本会话第一次投递时
     // 注入一次，别每条都重复占 token；会话被回收或 /reset 后会重新注入一遍。
     if (!record.chatPromptInjected) {
-      const chatPrompt = buildChatPrompt(config, { isGroup, isOwner: ownerInfo.isOwner })
+      const chatPrompt = buildChatPrompt(config, {
+        isGroup,
+        isOwner: ownerInfo.isOwner,
+        faces: facesForPrompt(config, 12),
+        facts: loadFactsFor(record),
+        factsFile: factsFileFor(record),
+      })
       if (chatPrompt) parts.unshift(chatPrompt, '')
       // 主动换过会话：把上一段聊天的尾巴放最前面，让它知道刚聊到哪
       if (Array.isArray(record.swapSeed) && record.swapSeed.length > 0) {
         parts.unshift(
-          '[上一段聊天（换新会话前留下的最后几条，用来接话；不用逐条回应）]',
+          '[上一段会话留下的接话材料（交接或最近几句，照这个接，别当成姐姐刚说的话）]',
           ...record.swapSeed,
           '[上一段聊天结束]',
           '',
@@ -706,10 +773,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
     }
 
     const body = parts.join('\n')
-    const message = createUserMessage({
-      content: [{ type: 'text', text: body }],
-      source: { kind: 'user' },
-    })
 
     logger.info?.(`[dsh-qq] ← ${label}: ${(info.text || '[图片]').slice(0, 60)}`)
 
@@ -729,40 +792,39 @@ export function createInbound({ config, manager, logger, client, send, approval,
     }
 
     const maxTurnMs = Number(config.maxTurnMs) || 600000
-    const startedAt = Date.now()
+    const windowMs = Math.max(0, Number(config.mergeWindowMs ?? 5000))
 
-    manager.enqueue(record, async () => {
-      let timer = null
-      try {
-        // 私聊回一句「正在输入」，让对方知道这边在敲字（群聊没有这个概念，跳过）
-        if (!isGroup && client) {
-          client.call('set_input_status', { user_id: Number(peerId), event_type: 1 }, 5000).catch(() => {})
-        }
-        record.agent.followup(message)
+    // 作息：休息时段（或在说了晚安之后）收到的私聊先记着，不回 —— 早上一起交出去。
+    // 放在合并之前，因为「等待 5 秒」对一条要等到明早的消息没有意义。
+    if (sleep?.shouldHold?.(record)) {
+      sleep.hold(record, info.text || '[图片]')
+      return
+    }
+    // 说了晚安：这条仍然正常回（得有人应一句），但之后不再回。
+    sleep?.noteText?.(record, info.text || '')
 
-        const outcome = await Promise.race([
-          Promise.resolve(record.agent.whenIdle?.()).then(() => 'idle'),
-          new Promise((resolve) => {
-            timer = setTimeout(() => resolve('timeout'), maxTurnMs)
-          }),
-        ]).finally(() => {
-          if (timer) clearTimeout(timer)
-        })
-
-        if (outcome === 'timeout') {
-          // 只放开队列，不打断 Agent —— 它跑完的回复照样会从 outbound 发出去
-          const seconds = Math.round((Date.now() - startedAt) / 1000)
-          logger.warn(`[dsh-qq] ${label} 本轮已跑 ${seconds}s 仍未结束，先放开队列`)
-          if (typeof send === 'function') {
-            await send(
-              record,
-              `（这轮我还在弄，已经跑了 ${seconds} 秒，你先忙别的，好了我叫你）`,
-            ).catch(() => {})
-          }
-        }
-      } catch (err) {
-        logger.warn?.(`[dsh-qq] 投递给 ${label} 失败:`, err)
+    // 私聊连发：她一句一句发过来，别一条一条回（那样像接线员）。
+    // 收下之后等一小会儿，期间再来就并进同一轮；窗口一过，整段一次性投递。
+    if (windowMs > 0 && !isGroup) {
+      const key = `${scope}:${peerId}`
+      let batch = mergeBatches.get(key)
+      if (!batch) {
+        batch = { bodies: [], meta: null, timer: null }
+        mergeBatches.set(key, batch)
       }
-    })
+      batch.bodies.push(body)
+      // 用最新的 record（上下文换过会话的话，投给新那个）
+      batch.meta = { record, label, peerId, isGroup, client }
+      if (batch.timer) clearTimeout(batch.timer)
+      batch.timer = setTimeout(() => {
+        mergeBatches.delete(key)
+        const count = batch.bodies.length
+        if (count > 1) logger.info?.(`[dsh-qq] ${label} 连发 ${count} 条，合并成一轮回`)
+        runTurn({ ...batch.meta, body: batch.bodies.join('\n\n'), maxTurnMs })
+      }, windowMs)
+      return
+    }
+
+    runTurn({ record, label, peerId, isGroup, client, body, maxTurnMs })
   }
 }

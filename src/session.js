@@ -1,5 +1,6 @@
 import { deriveSessionId, sessionKey } from './shared/session-id.js'
 import { ensurePeerWorkspace, resolvePeerWorkspace } from './workspace.js'
+import { loadHandoffFor } from './settings.js'
 
 /**
  * 一个 QQ 会话（私聊 or 群）对应一个 DSH Agent。
@@ -16,6 +17,7 @@ export class SessionManager {
   #records = new Map() // sessionId -> record
   #byPeer = new Map() // peerKey -> sessionId
   #gens = new Map() // basePeerKey -> 代数（/reset 一次 +1，换一个全新 sessionId）
+  #seedByKey = new Map() // basePeerKey -> 下一代的交接 seed（换会话时留下）
   #ready = new Map() // 已铺好的会话目录（避免每次 attach 都 mkdir）
   #sweeper = null
 
@@ -25,6 +27,8 @@ export class SessionManager {
     this.config = config
     this.logger = logger
     this.closed = false
+    /** 回收前的保留判断（由 sleep 模块注入）：返回 true 就不回收。 */
+    this.keeper = null
   }
 
   get size() {
@@ -56,6 +60,11 @@ export class SessionManager {
 
   find(sessionId) {
     return this.#records.get(sessionId) ?? null
+  }
+
+  /** 当前活着的全部会话（主动说话要挨个看一眼谁安静了）。 */
+  list() {
+    return [...this.#records.values()]
   }
 
   /**
@@ -91,10 +100,12 @@ export class SessionManager {
    * 重置一个 QQ 会话：扔掉当前代理与上下文，下一次消息会开一个全新的会话。
    * 历史记录留在磁盘上但不再被 resume（换了 sessionId）。
    */
-  reset(record) {
+  reset(record, seed = null) {
     const current = this.#records.get(record.sessionId)
     if (!current) return false
     const baseKey = this.#baseKey(current.scope, current.peerId)
+    // ⭐ 2026-10-25：换会话时把「交接」留给下一代（姐姐/NapCat 触发 /reset 时也能接上话）。
+    if (Array.isArray(seed) && seed.length > 0) this.#seedByKey.set(baseKey, seed)
     this.#gens.set(baseKey, (this.#gens.get(baseKey) ?? 0) + 1)
     if (current.owned && current.dispose) {
       try {
@@ -135,8 +146,10 @@ export class SessionManager {
     }
 
     const attached = await this.#attach(sessionId, { scope, peerId, label })
+    // #attach 可能换了 id（磁盘上留了恢复不出来的空壳会话时），以它实际用的为准
+    const actualId = attached.sessionId ?? sessionId
     const record = {
-      sessionId,
+      sessionId: actualId,
       key,
       scope,
       peerId,
@@ -150,12 +163,15 @@ export class SessionManager {
       queue: Promise.resolve(),
       history: [],
       recent: [],
-      swapSeed: null,
+      // ⭐ 2026-10-25：交接优先从内存拿（/reset 当场存的）；内存没有、又是换过代的会话，
+      // 就从磁盘的 `交接.md` 再读一次 —— 这样「reset 完宿主刚好重启」也不会把交接丢掉。
+      swapSeed: this.#seedByKey.get(baseKey) ?? (gen > 0 ? loadHandoffFor({ dir: attached.cwd }) || null : null),
       chatPromptInjected: false,
     }
-    this.#records.set(sessionId, record)
-    this.#byPeer.set(key, sessionId)
-    this.logger.info?.(`[dsh-qq] 会话就绪 ${label} → ${sessionId}`)
+    this.#seedByKey.delete(baseKey)
+    this.#records.set(actualId, record)
+    this.#byPeer.set(key, actualId)
+    this.logger.info?.(`[dsh-qq] 会话就绪 ${label} → ${actualId}`)
     return record
   }
 
@@ -208,9 +224,12 @@ export class SessionManager {
       })
       if (handle?.agent) {
         this.logger.debug?.(`[dsh-qq] resume 命中 ${sessionId.slice(0, 8)}`)
-        return { agent: handle.agent, dispose: () => handle.dispose(), owned: true, cwd }
+        return { agent: handle.agent, dispose: () => handle.dispose(), owned: true, cwd, sessionId }
       }
     } catch (err) {
+      // 恢复失败不一定是「没有历史」：也可能是磁盘上留了个半截会话。
+      // 把原因打出来，下次再遇到「发消息没反应」能直接看到。
+      this.logger.debug?.(`[dsh-qq] resume 未命中 ${sessionId.slice(0, 8)}：${err?.message ?? err}`)
       // ⚠️ 带 meta 的 resume 若被宿主拒绝，退回不带 meta 的老调用（历史会话照旧能起来，
       // 只是工作目录还是它当年那个 —— 发一句 /reset 就会落到新目录）
       if (cwd) {
@@ -223,10 +242,10 @@ export class SessionManager {
             this.logger.warn?.(
               `[dsh-qq] 历史会话 ${sessionId} 沿用旧工作目录，发 /reset 可切到 ${cwd}（原因：${err?.message ?? err}）`,
             )
-            return { agent: handle.agent, dispose: () => handle.dispose(), owned: true, cwd }
+            return { agent: handle.agent, dispose: () => handle.dispose(), owned: true, cwd, sessionId }
           }
-        } catch {
-          /* 没有历史，正常分支 */
+        } catch (err2) {
+          this.logger.debug?.(`[dsh-qq] 退一步 resume 也没成 ${sessionId.slice(0, 8)}：${err2?.message ?? err2}`)
         }
       }
     }
@@ -235,14 +254,34 @@ export class SessionManager {
     const meta = {}
     const workdir = cwd || this.config.cwd
     if (workdir) meta.cwd = workdir
-    this.logger.debug?.(`[dsh-qq] create ${sessionId.slice(0, 8)} cwd=${workdir ?? '(null)'}`)
-    const handle = await this.agents.create({
-      sessionId,
+    const createOptions = {
       ...(Object.keys(meta).length > 0 ? { meta } : {}),
       ...(hasAgentOptions ? { agentOptions } : {}),
-    })
-    if (!handle?.agent) throw new Error('agents.create 没有返回 agent')
-    return { agent: handle.agent, dispose: () => handle.dispose(), owned: true, cwd: workdir || null }
+    }
+    this.logger.debug?.(`[dsh-qq] create ${sessionId.slice(0, 8)} cwd=${workdir ?? '(null)'}`)
+    try {
+      const handle = await this.agents.create({ sessionId, ...createOptions })
+      if (!handle?.agent) throw new Error('agents.create 没有返回 agent')
+      return { agent: handle.agent, dispose: () => handle.dispose(), owned: true, cwd: workdir || null, sessionId }
+    } catch (err) {
+      // 上一次崩在写会话的那一刻，磁盘上会留一个只有 header 的空壳：
+      // 拿这个 id 去 create 会被拒（already exists），resume 又恢复不出东西来，
+      // 用户看到的就是「发消息没人回」。这里兜底：再 resume 一次，还不行就换 id 重开。
+      const again = await this.agents
+        .resume({ resumeSessionId: sessionId, ...(hasAgentOptions ? { agentOptions } : {}) })
+        .catch(() => null)
+      if (again?.agent) {
+        this.logger.warn?.(`[dsh-qq] 会话 ${sessionId.slice(0, 8)} 建不出来，退回 resume 成功`)
+        return { agent: again.agent, dispose: () => again.dispose(), owned: true, cwd: cwd ?? null, sessionId }
+      }
+      const freshId = `${sessionId}-r${Date.now().toString(36)}`
+      this.logger.warn?.(
+        `[dsh-qq] 会话 ${sessionId.slice(0, 8)} 残留且恢复不了（${err?.message ?? err}），改用新 id ${freshId.slice(0, 16)}`,
+      )
+      const handle = await this.agents.create({ sessionId: freshId, ...createOptions })
+      if (!handle?.agent) throw new Error('agents.create 没有返回 agent')
+      return { agent: handle.agent, dispose: () => handle.dispose(), owned: true, cwd: workdir || null, sessionId: freshId }
+    }
   }
 
   #sweep() {
@@ -251,6 +290,10 @@ export class SessionManager {
     for (const [sessionId, record] of this.#records) {
       if (record.busy > 0) continue
       if (now - record.lastActive <= ttl) continue
+      // ⭐ 2026-10-25 修：睡着/攒着消息的会话别回收。
+      // 回收后 sleep.tick 和 wake.tick 都只遍历 list()，够不着它 —— 夜里攒的话第二天没人交，
+      // 早上也不会主动开口。等睡醒、pending 交完，下一轮 sweep 再正常回收。
+      if (this.keeper?.(record)) continue
       if (record.owned && record.dispose) {
         try {
           Promise.resolve(record.dispose()).catch(() => {})

@@ -13,7 +13,8 @@
  */
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { loadHandoffFor } from './settings.js'
+import { createMessage } from '@deepseek-ai/dsh-llm'
 
 function pickSession(args) {
   if (args.length >= 2) return { session: args[0], raw: args[1] }
@@ -47,7 +48,7 @@ export function createContextGuard({ manager, config, logger }) {
   const swapRatio = Number(config.contextSwapRatio ?? 0.7)
   const minTokens = Number(config.contextSwapMinTokens ?? 200_000)
   const keep = Math.max(5, Number(config.contextMemoryKeep ?? 30))
-  const ownerLabel = String(config.ownerLabel ?? '').trim() || '主人'
+  const ownerLabel = String(config.ownerLabel ?? '').trim() || '姐姐'
 
   /** 从持久事件里顺手更新「这个会话的压力」。 */
   function note(record, raw) {
@@ -61,11 +62,11 @@ export function createContextGuard({ manager, config, logger }) {
     if (type === 'assistant/message') {
       const usage = data.usage
       if (!usage) return
-      // prompt 大小 = 未命中缓存的输入 + 命中缓存的输入；output 是回复本身
+      // 压力只看「下一轮要重新付钱的输入」：未命中缓存的输入 + 命中缓存的输入。
+      // output 是这一轮刚生成的回复，下一轮不一定整段回灌；算进去会高估压力、提前换会话。
       const prompt = Number(usage.inputTokens ?? 0) + Number(usage.cacheReadTokens ?? 0)
-      const total = prompt + Number(usage.outputTokens ?? 0)
-      if (total > 0) {
-        record.promptTokens = total
+      if (prompt > 0) {
+        record.promptTokens = prompt
         record.promptAt = Date.now()
       }
     }
@@ -81,9 +82,17 @@ export function createContextGuard({ manager, config, logger }) {
       : `[刚才的长对话被系统压缩成了摘要，细节可能变模糊了。对面是${ownerLabel}，按上面的设定接着说话。]`
     try {
       record.agent?.inject?.(
-        createUserMessage({
+        createMessage({
+          role: 'user',
           content: [{ type: 'text', text: card }],
-          source: { kind: 'user' },
+          // 这是插件发的系统提示，不是姐姐刚说的话——用 plugin + notice 标清楚，
+          // 免得模型把它当成用户输入，回一句「好的我记住了」给姐姐看。
+          source: {
+            kind: 'plugin',
+            plugin: 'dsh-qq',
+            form: 'notice',
+            summary: '上下文已压缩，人设与聊天规矩重新注入',
+          },
         }),
       )
     } catch (err) {
@@ -92,6 +101,11 @@ export function createContextGuard({ manager, config, logger }) {
     logger.info?.(
       `[dsh-qq] ${record.label} 上下文被压缩（第 ${record.compactedCount} 次），下一轮重注入聊天规矩`,
     )
+  }
+
+  /** 读这轮会话的「交接」：她自己写的，换会话时比 30 条原文更省也更像话。 */
+  async function readHandoff(record) {
+    return loadHandoffFor(record)
   }
 
   /** 把最近聊天落到这个会话自己的记忆区里，换会话后还能翻。 */
@@ -139,20 +153,36 @@ export function createContextGuard({ manager, config, logger }) {
       const window = Number(record.contextWindow ?? 0)
       const tokens = Number(record.promptTokens ?? 0)
       if (!window || !tokens) return null
-      if (tokens < minTokens) return null
-      if (tokens < window * swapRatio) return null
+      // 阈值取「固定下限」和「窗口比例」里更小的那个：
+      // 窗口只有 128K 时，固定下限 200K 永远够不着，换会话就永不触发。
+      const threshold = Math.min(minTokens, window * swapRatio)
+      if (tokens < threshold) return null
       if (record.busy > 0) return null // 正在跑就别动，下一轮再说
 
-      const seed = (record.recent?.length ? record.recent : record.history ?? []).slice(-keep)
+      // ⭐ 2026-10-25 P2：优先用她自己写的交接（几行，带语气、答应了什么），
+      // 只补最后 3 句原话兜底——她担心的「漏了姐姐随口提的一句」由这三句接住。
+      // 没有交接就退回旧行为（最近 keep 条原文），并在日志里说清楚，方便查。
+      const handoff = await readHandoff(record)
+      const all = record.recent?.length ? record.recent : record.history ?? []
+      const tail = all.slice(-3)
+      const seed = handoff
+        ? [
+            '[上一段会话的交接（你自己写的）——照着接，别当成姐姐刚说的话]',
+            handoff,
+            '',
+            `[最后 ${tail.length} 句原话，接着语气用]`,
+            ...tail,
+          ]
+        : all.slice(-keep)
       let memoryPath = ''
       try {
         memoryPath = await writeMemory(record)
       } catch (err) {
         logger.warn?.(`[dsh-qq] 写聊天记忆失败（不影响换会话）: ${err?.message ?? err}`)
       }
-      manager.reset(record)
+      manager.reset(record, seed)
       logger.info?.(
-        `[dsh-qq] ${record.label} 上下文压力 ${tokens}/${window}（${Math.round((tokens / window) * 100)}%）已达阈值，换新会话${memoryPath ? `（旧聊天记在 ${memoryPath}）` : ''}`,
+        `[dsh-qq] ${record.label} 上下文压力 ${tokens}/${window}（${Math.round((tokens / window) * 100)}%）已达阈值，换新会话${handoff ? `（交接 + 最后 ${tail.length} 句原话）` : `（没有交接.md，退回最后 ${seed.length} 条原文）`}${memoryPath ? `（旧聊天记在 ${memoryPath}）` : ''}`,
       )
       return seed
     },

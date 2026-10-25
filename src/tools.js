@@ -8,7 +8,11 @@
  * 不让插件因为缺服务而启动失败。
  */
 
-import { pickFace, keepFace, facesCount } from './faces.js'
+import { existsSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+
+import { pickFace, keepFace, facesCount, faceSendState, markFaceSent, listFaces } from './faces.js'
+import { appendFact } from './settings.js'
 
 const POKE_DESC =
   '戳一戳当前对话里的对方（私聊戳好友，群聊戳那位发言的人）。用来提醒对方注意、' +
@@ -64,6 +68,53 @@ export function registerTools(ctx, { client, manager, config, logger }) {
     logger.info?.('tools 服务不可用，QQ 互动工具未注册（聊天本身不受影响）')
     return
   }
+
+  tools.register({
+    name: 'qq_facts',
+    description:
+      '读写自己的事实卡（跨压缩还记得的关键事实：姐姐怎么称呼、作息、禁忌、正在做的事）。' +
+      '只有姐姐说「记一下」时才用 append 往当前会话那一节加一行；平时不用调 read——事实卡已经在你面前的提示里了。',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['read', 'append'], description: 'read=看一眼现在的全文；append=加一行' },
+        text: { type: 'string', description: 'append 时要记的那一行（短，一句话）' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: { ok: { type: 'boolean' }, file: { type: 'string' }, text: { type: 'string' } },
+        required: ['ok'],
+        additionalProperties: false,
+      },
+      render: (_args, value) => [
+        { type: 'text', text: value.ok ? `事实卡已更新：${String(value.text ?? '').slice(0, 60)}` : '事实卡没写成（看一眼日志）' },
+      ],
+    },
+    async execute(args, exec) {
+      const record = needRecord(manager, exec)
+      const file = join(dirname(String(record.dir ?? '')), '事实卡.md')
+      if (args?.action === 'read') {
+        try {
+          const { readFileSync } = await import('node:fs')
+          return { ok: true, file, text: readFileSync(file, 'utf8') }
+        } catch {
+          return { ok: false, file, text: '' }
+        }
+      }
+      if (args?.action !== 'append') throw new Error('qq_facts: action 只能是 read 或 append')
+      try {
+        appendFact(file, record.label, args?.text)
+        return { ok: true, file, text: String(args?.text ?? '') }
+      } catch (err) {
+        logger.warn?.(`qq_facts 写入失败: ${err?.message ?? err}`)
+        return { ok: false, file, text: String(args?.text ?? '') }
+      }
+    },
+  })
 
   tools.register({
     name: 'qq_poke',
@@ -205,24 +256,31 @@ export function registerTools(ctx, { client, manager, config, logger }) {
     output: {
       schema: {
         type: 'object',
-        properties: { ok: { type: 'boolean' }, target: { type: 'string' } },
+        properties: { ok: { type: 'boolean' }, target: { type: 'string' }, reason: { type: 'string' } },
         required: ['ok', 'target'],
         additionalProperties: false,
       },
       render: (_args, value) => [
-        { type: 'text', text: value.ok ? `图片已发到 ${value.target}` : `图片没发出去` },
+        {
+          type: 'text',
+          text: value.ok ? `图片已发到 ${value.target}` : `图片没发出去${value.reason ? `：${value.reason}` : ''}`,
+        },
       ],
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
       const file = String(args?.file ?? '').trim()
       if (!file) throw new Error('qq_send_image: file 不能为空')
+      // 图片也算「发图」，跟表情包共用同一个节奏闸
+      const gate = faceSendState(config)
+      if (!gate.allowed) return { ok: false, target: record.label, reason: gate.reason }
       const action = record.scope === 'group' ? 'send_group_msg' : 'send_private_msg'
       try {
         await client.call(action, {
           ...peerOf(record),
           message: [{ type: 'image', data: { file } }],
         })
+        markFaceSent()
         return { ok: true, target: record.label }
       } catch (err) {
         logger.warn?.(`qq_send_image 失败: ${err?.message ?? err}`)
@@ -495,7 +553,12 @@ export function registerTools(ctx, { client, manager, config, logger }) {
       type: 'object',
       properties: {
         path: { type: 'string', description: '本地图片的绝对路径' },
-        summary: { type: 'string', description: '一句话概括这张表情的情绪，例如「捂脸」「吐泡泡」' },
+        summary: {
+          type: 'string',
+          description:
+            '给这张起的名字，以后靠它挑图。图上有大字就用那行字，越短越好（「哼！」「求求了…」「下次见！」）；' +
+            '没字就一句话说清画面和情绪（「抱着白饭碗干饭」「抱着小人偶一脸问号」）。',
+        },
       },
       required: ['path'],
       additionalProperties: false,
@@ -530,19 +593,66 @@ export function registerTools(ctx, { client, manager, config, logger }) {
   })
 
   tools.register({
-    name: 'qq_mface',
+    name: 'qq_faces',
     description:
-      '发一个 QQ「商城表情/表情包」（就是聊天框表情面板里那种大图表情，不是 emoji）。' +
-      '不填 emoji_id 就从收藏里随机挑一个 —— 收藏是平时别人发表情包时自动攒下来的。' +
-      '想指定某个，给 emoji_id 和 emoji_package_id（从收到的 mface 消息里拿得到）。' +
-      '服务端不认这个 id 时，会自动改用官方 CDN 的图片地址兜底，不会报错。',
+      '看「表情包收藏」里都有哪些图（名字 + 数量）。挑图之前先看一眼，别凭印象猜名字。' +
+      '可以带 keyword 过滤，例如「问号」会把名字里带「问号」的挑出来。',
     parameters: {
       type: 'object',
       properties: {
-        emoji_id: { type: 'string', description: '表情 id，例如 96e2cc34b1a4d3ee6b2b；留空则从收藏里随机挑' },
+        keyword: { type: 'string', description: '按名字里的字过滤，可空' },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          total: { type: 'integer' },
+          matched: { type: 'integer' },
+          names: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['ok', 'total'],
+        additionalProperties: false,
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text: value.ok
+            ? `一共 ${value.total} 张，匹配 ${value.matched} 张：${
+                value.names?.length ? value.names.join('、') : '（没有名字对得上的）'
+              }`
+            : '收藏里一张图都没有',
+        },
+      ],
+    },
+    async execute(args) {
+      const all = listFaces(config, 500)
+      const kw = String(args?.keyword ?? '').trim()
+      const names = all
+        .map((f) => String(f.summary ?? '').trim())
+        .filter((n) => n && (!kw || n.includes(kw)))
+      return { ok: all.length > 0, total: all.length, matched: names.length, names: names.slice(0, 50) }
+    },
+  })
+
+  tools.register({
+    name: 'qq_mface',
+    description:
+      '发一张表情包（收藏里的图，或 QQ 商城表情）。' +
+      '一般只写 summary —— 用收藏那张的名字，比如「抱着小人偶一脸问号」「哼！」「求求了」；' +
+      '不知道有哪些名字就先调 qq_faces 看一眼，别瞎猜。不写 summary 就从收藏里随机挑一张。' +
+      '也可以给 emoji_id + emoji_package_id 指定某个商城表情。' +
+      '⚠️ 有节奏限制：两张之间至少隔一会儿、一小时有上限，超了会被直接拒绝。' +
+      '表情是点缀，不是标点符号 —— 正经说话就好好说，别每句都配一张。',
+    parameters: {
+      type: 'object',
+      properties: {
+        emoji_id: { type: 'string', description: '表情 id（指定商城表情时才用），例如 96e2cc34b1a4d3ee6b2b' },
         emoji_package_id: { type: 'string', description: '表情包 id（可空，兜底 CDN 要用）' },
         key: { type: 'string', description: '有些版本需要 key，可空' },
-        summary: { type: 'string', description: '想要的表情含义，例如「捂脸」；收藏里有匹配的会优先挑它' },
+        summary: { type: 'string', description: '要哪张：收藏那张的名字，例如「抱着小人偶一脸问号」；收藏里有对得上的就发它' },
       },
       additionalProperties: false,
     },
@@ -569,6 +679,12 @@ export function registerTools(ctx, { client, manager, config, logger }) {
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
+
+      // 节奏闸：表情是点缀，不是标点符号（姐姐原话「不能频繁使用，偶尔用用」）
+      const gate = faceSendState(config)
+      if (!gate.allowed) {
+        return { ok: false, mode: 'throttled', messageId: 0, reason: gate.reason }
+      }
 
       // 没给 id 就从收藏里挑一个；收藏空着就直接说清楚，别硬发
       let face
@@ -601,6 +717,14 @@ export function registerTools(ctx, { client, manager, config, logger }) {
 
       // 收藏里也可能是一张本地图片 —— 直接按图片发
       if (face.kind === 'image') {
+        if (!existsSync(face.path)) {
+          return {
+            ok: false,
+            mode: 'none',
+            messageId: 0,
+            reason: `收藏的图片文件不见了：${face.path}（换一个吧，或者让主人重新收一张）`,
+          }
+        }
         try {
           const result = await client.call(action, {
             ...target,
@@ -609,6 +733,7 @@ export function registerTools(ctx, { client, manager, config, logger }) {
           const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
           if (sentId > 0) {
             record.lastSentMessageId = sentId
+            markFaceSent()
             return { ok: true, mode: 'image', messageId: sentId, reason: face.summary || '' }
           }
         } catch (err) {
@@ -635,6 +760,7 @@ export function registerTools(ctx, { client, manager, config, logger }) {
         const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
         if (sentId > 0) {
           record.lastSentMessageId = sentId
+          markFaceSent()
           return { ok: true, mode: 'mface', messageId: sentId }
         }
       } catch (err) {
@@ -652,6 +778,7 @@ export function registerTools(ctx, { client, manager, config, logger }) {
           const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
           if (sentId > 0) {
             record.lastSentMessageId = sentId
+            markFaceSent()
             return { ok: true, mode: 'cdn', messageId: sentId }
           }
         } catch (err) {
@@ -669,6 +796,6 @@ export function registerTools(ctx, { client, manager, config, logger }) {
   })
 
   logger.info?.(
-    `QQ 互动工具已注册：qq_poke / qq_react / qq_like / qq_send_image / qq_send_file / qq_face / qq_mface / qq_reply / qq_send / qq_recall（表情包收藏 ${facesCount(config)} 个）`,
+    `QQ 互动工具已注册：qq_facts / qq_poke / qq_react / qq_like / qq_send_image / qq_send_file / qq_face / qq_mface / qq_faces / qq_reply / qq_send / qq_recall（表情包收藏 ${facesCount(config)} 个）`,
   )
 }

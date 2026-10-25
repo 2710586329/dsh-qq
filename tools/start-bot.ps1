@@ -114,6 +114,8 @@ if ($listening) {
 }
 
 Write-Host '[3/3] 启动 dsh-qq 宿主...' -ForegroundColor Yellow
+# 注意：宿主是 Electron 的 GUI 子进程，stdout 重定向过去拿到的也是 0 字节空文件，
+# 所以这里不做重定向。插件日志由插件自己写：<workspaceRoot>\logs\dsh-qq-<日期>.log
 Start-Process -FilePath $dsh -ArgumentList '--profile','qqbot' -WorkingDirectory (Split-Path $dsh) -WindowStyle Hidden
 
 Start-Sleep -Seconds 8

@@ -11,6 +11,18 @@
 
 脚本里**没有写死任何人的路径**：找不到就自己去找；需要特事特办，就复制 `tools/qqbot.config.example.ps1` 成 `tools/qqbot.config.ps1` 改几行。
 
+## 宿主日志在哪
+
+`start-bot.ps1` 会把宿主的 stdout / stderr 重定向到 `logs\qqbot-<启动时间>.log` 和 `.err.log`，每次启动一个文件，只留最近 10 个（`logs/` 不进仓库）。
+
+想看「它到底为什么没反应」，先翻这个：
+
+```powershell
+Get-Content (Get-ChildItem logs\qqbot-*.log | Sort-Object LastWriteTime -Descending | Select-Object -First 1) -Tail 80
+```
+
+插件里 `logger.info` 打的东西都在这（连上 NapCat、主动说话已启动、工具调用失败的原因…）。`debug: true` 时细节会更多。
+
 ## 为什么看门狗要检查「Established 连接」
 
 进程活着、日志也不报错、但 WebSocket 早就断了——这是最难发现的一种**假活**：群里 @ 它一点反应都没有，翻日志却一片安静。
@@ -19,7 +31,7 @@
 
 ## 定时写日记
 
-`diary.ps1` 的套路是：只读 `<会话目录>/聊天记录/<今天>.md`，写 `<会话目录>/记忆区/日记/<日期>-<小时>-00.md`，**绝不碰宿主自己的 `本地记忆区`**——QQ 会话的记忆和主人的私人记忆是两回事。
+`diary.ps1` 的套路是：只读 `<会话目录>/聊天记录/<今天>.md`，写 `<会话目录>/记忆区/日记/<日期>.md`（**一天一篇**；一天里跑多次就往末尾追加小节，已经写过的时段不重写），**绝不碰宿主自己的 `本地记忆区`**——QQ 会话的记忆和主人的私人记忆是两回事。
 
 挂计划任务（管理员 PowerShell）：
 

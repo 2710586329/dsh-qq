@@ -18,7 +18,7 @@
  * ============================================================================
  */
 import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join, resolve, dirname, basename } from 'node:path'
 import { homedir } from 'node:os'
 import { createServer } from 'node:http'
 
@@ -66,6 +66,23 @@ export const OVERRIDABLE = [
   'splitDelayMs',
   'streamReply',
   'streamMaxChunks',
+  // 表情包
+  'faceCollectHint',
+  'faceSendGapMs',
+  'faceSendMaxPerHour',
+  // 主动说话
+  'proactiveEnabled',
+  'proactiveSilentMs',
+  'proactiveMaxPerDay',
+  'proactiveQuietHours',
+  // 作息
+  'sleepMode',
+  'bedtimeAt',
+  'sleepFrom',
+  'sleepTo',
+  'goodnightWords',
+  // 连发合并
+  'mergeWindowMs',
   // 语音
   'asrEnabled',
   'asrPython',
@@ -425,4 +442,111 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
     `${injectedWebServer ? 'DSH 路由已尝试' : '没有 DSH 路由'} + 本地服务 ${LOCAL_API_PORT}`,
   )
   return mounted
+}
+
+/**
+ * 读「事实卡」（P1）：`<QQ会话根>/事实卡.md` 里属于这个会话的那几节。
+ *
+ * 为什么放 `QQ会话/` 根目录而不是每个会话目录里：姐姐 2026-10-25 定的——
+ *   一个文件两节（`## 全局` + `## 会话 <label>`），改一处全会话可见，
+ *   不会出现「私聊里改了称呼、群里还是旧的」。
+ * 只放「压丢会出事」的东西，一页以内；这里不做长度截断，靠人写的时候克制。
+ *
+ * 读失败（文件没有/没权限）一律返回空串——事实卡丢了也不能耽误聊天。
+ */
+/**
+ * 这个会话自己写的「交接」——换会话时接话用。
+ * 空文件/只有标题的不算。
+ */
+export function loadHandoffFor(record) {
+  const dir = String(record?.dir ?? '').trim()
+  if (!dir) return ''
+  try {
+    const file = join(dir, '交接.md')
+    if (!existsSync(file)) return ''
+    const text = readFileSync(file, 'utf8').trim()
+    return text.replace(/^#.*$/gm, '').trim().length >= 20 ? text : ''
+  } catch {
+    return ''
+  }
+}
+
+/** 事实卡文件的完整路径（会话目录的上一级）。发布版不写死某台机器的路径。 */
+export function factsFileFor(record) {
+  const dir = String(record?.dir ?? '').trim()
+  return dir ? join(dirname(dir), '事实卡.md') : ''
+}
+
+export function loadFactsFor(record) {
+  const dir = String(record?.dir ?? '').trim()
+  if (!dir) return ''
+  try {
+    const file = factsFileFor(record)
+    if (!existsSync(file)) return ''
+    // ⚠️ 2026-10-25 修：`record.label` 是「私聊 普瑞赛斯(希儿)(2710586329)」这种给人看的，
+    // 不是目录名「私聊_2710586329」。拿 label 去匹配只匹配到「全局」节，
+    // 会话节整节丢掉（LLM 看到的卡断在「姐姐最近在忙」那行）。目录名才是稳定键。
+    return pickFacts(readFileSync(file, 'utf8'), basename(dir))
+  } catch {
+    return ''
+  }
+}
+
+/** 从事实卡全文里挑出「全局」+「会话 <label>」两节；标题允许带不带「会话 」前缀。 */export function pickFacts(text, label) {
+  const want = new Set(['全局'])
+  const tag = String(label ?? '').trim()
+  if (tag) {
+    want.add(`会话 ${tag}`)
+    want.add(tag)
+  }
+  const out = []
+  let cur = null
+  const isWanted = (name) =>
+    want.has(name) || [...want].some((w) => name === w || name.endsWith(` ${w}`))
+  for (const line of String(text ?? '').split(/\r?\n/)) {
+    const m = /^##\s+(.+?)\s*$/.exec(line)
+    if (m) {
+      cur = m[1]
+      continue
+    }
+    if (cur && isWanted(cur)) out.push(line)
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
+/**
+ * 往事实卡里加一行（P1 的写入口，只有 `qq_facts` 工具会调）。
+ *
+ * 规则：只加、不改、不删。找 `## 会话 <label>` 那一节，加在节尾；
+ * 没有这一节就补一节。姐姐说「记一下」才该动到这里。
+ * @returns {{ok:boolean, file:string, section:string}}
+ */
+export function appendFact(file, label, line) {
+  const add = `- ${String(line ?? '').trim()}`
+  if (add === '-') throw new Error('appendFact: 要记的内容是空的')
+  let text = ''
+  try {
+    if (existsSync(file)) text = readFileSync(file, 'utf8')
+  } catch {
+    text = ''
+  }
+  if (!text.trim()) {
+    text = `# QQ 鲸鲸的事实卡\n\n> 只放「压缩掉会出事」的东西，一页以内。\n\n`
+  }
+
+  const heading = `## 会话 ${String(label ?? '').trim() || '未知'}`
+  const idx = text.indexOf(heading)
+  if (idx === -1) {
+    text = `${text.replace(/\s*$/, '')}\n\n${heading}\n\n${add}\n`
+  } else {
+    const after = text.slice(idx + heading.length)
+    const nextRel = after.search(/^##\s/m)
+    const bodyEnd = nextRel === -1 ? text.length : idx + heading.length + nextRel
+    const before = text.slice(0, bodyEnd).replace(/\s*$/, '')
+    const rest = nextRel === -1 ? '' : `\n${text.slice(bodyEnd).replace(/^\s*/, '')}`
+    text = `${before}\n${add}\n${rest}`
+  }
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, text, 'utf8')
+  return { ok: true, file, section: heading }
 }

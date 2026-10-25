@@ -120,6 +120,12 @@ export const ConfigSchema = Schema.object({
     .description(
       '什么样的图值得收进表情包收藏（qq_keep_face），例如「猫猫梗图」。留空表示不收藏任何图片，只让 Agent 看图说话',
     ),
+  faceSendGapMs: Schema.number()
+    .default(90000)
+    .description('两次发图片/表情之间至少隔多少毫秒（防止刷屏）；0 = 不限制'),
+  faceSendMaxPerHour: Schema.number()
+    .default(6)
+    .description('一小时内最多发多少张图片/表情（qq_mface / qq_send_image 合计）；0 = 不限制'),
   imageCacheDir: Schema.string()
     .default('')
     .description('收到的图片下载到哪个目录；留空用 <cwd>/图片缓存'),
@@ -166,6 +172,46 @@ export const ConfigSchema = Schema.object({
   streamMaxChunks: Schema.number()
     .default(3)
     .description('一个回合里最多流式发几条，超出就攒起来一起发'),
+
+  // ── 主动说话 ──
+  proactiveEnabled: Schema.boolean()
+    .default(true)
+    .description('没人说话、安静了一段时间之后，主动开口一次（冷场冒泡）'),
+  proactiveSilentMs: Schema.number()
+    .default(1200000)
+    .description(
+      '会话安静多久算「冷场」，单位毫秒，默认 20 分钟。要小于 sessionIdleTimeout（默认 30 分钟），否则会话先被回收、根本没机会开口',
+    ),
+  proactiveMaxPerDay: Schema.number()
+    .default(6)
+    .description('每个会话每天最多主动开口几次；0 = 不主动'),
+  proactiveQuietHours: Schema.string()
+    .default('23:00-08:00')
+    .description('静默时段：这段时间不主动开口。格式 HH:MM-HH:MM，留空 = 不限'),
+
+  // ── 作息（睡前提醒 / 晚安静默 / 夜里消息留到早上） ──
+  sleepMode: Schema.boolean()
+    .default(true)
+    .description('作息总开关：到点提醒睡觉、说晚安就休息、休息时段的消息留到早上一起回'),
+  bedtimeAt: Schema.string()
+    .default('23:30')
+    .description('几点提醒她该睡了（HH:MM）。留空 = 不提醒'),
+  sleepFrom: Schema.string()
+    .default('00:00')
+    .description('休息时段从几点开始（HH:MM）：这时候起收到的私聊不立刻回'),
+  sleepTo: Schema.string()
+    .default('08:00')
+    .description('休息时段到几点结束（HH:MM）：这时候把夜里攒的消息一次交出去'),
+  goodnightWords: Schema.string()
+    .default('晚安,睡了,睡觉,去睡,我先睡,困了,睡啦')
+    .description('说到这些词就当她说晚安了，之后不再回消息直到睡醒。逗号分隔'),
+
+  // ── 连发合并 ──
+  mergeWindowMs: Schema.number()
+    .default(5000)
+    .description(
+      '连发合并：收到一条私聊消息后等这么久（毫秒），期间再接到的消息并成同一轮再回；0 = 关掉，来一条回一条',
+    ),
 
   // ── 上下文管理 ──
   contextGuard: Schema.boolean()

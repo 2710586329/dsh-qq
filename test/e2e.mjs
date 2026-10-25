@@ -82,6 +82,7 @@ const config = Config({
   groupMode: 'open',
   privateMode: 'open',
   splitDelayMs: 0,
+  mergeWindowMs: 0, // 连发合并单独用一个用例验，别让每条断言都等 5 秒
   groupMinGapMs: 0, // 间隔由真实部署管，测试里关掉免得每个断言都要等 4 秒
   groupReplyGapMs: 0, // 同上：均匀间隔单独用一个用例验，别拖慢其他断言
   persona: '你叫小满，是个住在电脑里的助手。',
@@ -509,6 +510,36 @@ assert.match(swappedText, /聊点别的/)
 assert.match(swappedText, /你正在用 QQ 跟人聊天/, '新会话应该重新注入聊天规矩')
 assert.match(swappedText, /上一段聊天/, '新会话应该带上上一段聊天的尾巴')
 console.log('✓ 压力超限自动换新会话（带 seed 接话）')
+
+// —— 连发合并：一口气发三条，只回一轮 ——
+const { ctx: ctx3, created: created3 } = createFakeCtx()
+const config3 = Config({
+  wsUrl: `ws://127.0.0.1:${PORT}`,
+  accessToken: TOKEN,
+  privateMode: 'open',
+  splitDelayMs: 0,
+  mergeWindowMs: 300,
+})
+apply(ctx3, config3)
+await waitFor(() => mock.clientCount === 3, { what: '第三个实例连上' })
+mock.emitPrivateText({ userId: 77111, nickname: '连发的人', text: '在吗', messageId: 501 })
+mock.emitPrivateText({ userId: 77111, nickname: '连发的人', text: '我问你个事', messageId: 502 })
+mock.emitPrivateText({ userId: 77111, nickname: '连发的人', text: '就是那个好了没', messageId: 503 })
+await sleep(120)
+assert.equal(
+  created3.some((a) => a.received.length > 0),
+  false,
+  '还在窗口内，不该急着投递',
+)
+await sleep(400)
+const mergedAgent = created3.find((a) => a.received.length > 0)
+assert.ok(mergedAgent, '窗口结束后应该投递一轮')
+const mergedText = textOf(mergedAgent.received[0])
+assert.match(mergedText, /在吗/, '合并后的正文应该带上第一条')
+assert.match(mergedText, /我问你个事/, '合并后的正文应该带上第二条')
+assert.match(mergedText, /就是那个好了没/, '合并后的正文应该带上第三条')
+assert.equal(mergedAgent.received.length, 1, '三条连发只该投递一轮')
+console.log('✓ 连发合并：三条攒成一轮，只回一次')
 
 await mock.close()
 console.log('\n全部通过 🎉')

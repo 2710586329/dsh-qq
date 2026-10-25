@@ -1,4 +1,4 @@
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { ConfigSchema } from './config.js'
 import { OneBotClient } from './onebot/client.js'
@@ -8,6 +8,8 @@ import { createInbound, historyLine, pushHistory } from './inbound.js'
 import { appendChatLog } from './chatlog.js'
 import { SILENT_MARKER } from './prompts.js'
 import { createOutbound } from './outbound.js'
+import { createWake } from './wake.js'
+import { createSleep } from './sleep.js'
 import { createContextGuard } from './context-guard.js'
 import { splitText, sleep } from './shared/chunk.js'
 import { registerTools } from './tools.js'
@@ -24,26 +26,46 @@ export const name = 'dsh-qq'
 export const inject = ['agents']
 export const Config = ConfigSchema
 
+const ensuredLogDirs = new Set()
+
+function formatArg(a) {
+  if (typeof a === 'string') return a
+  if (a instanceof Error) return a.stack ?? a.message
+  return safeJson(a)
+}
+
+/** 日志时间戳用**本地时间**（带偏移），不用 toISOString()。
+ * 用 UTC 的话，北京时间晚上 9 点会写成 13:22Z —— 翻日志的人（和模型自己）
+ * 一眼看过去就是「下午一点」，判断全乱（2026-10-24 姐姐指出来过）。 */
+function localStamp(d) {
+  const p = (n) => String(n).padStart(2, '0')
+  const off = -d.getTimezoneOffset()
+  const abs = Math.abs(off)
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}${off >= 0 ? '+' : '-'}${p(Math.floor(abs / 60))}:${p(abs % 60)}`
+}
+
 function makeLogger(ctx, config) {
   const base = ctx?.logger ?? console
   const prefix = '[dsh-qq]'
-  // debug 开着时，额外落一份到 workspaceRoot（固定位置，不随启动目录漂移；
-  // 没配 workspaceRoot 才退回进程 cwd），headless 宿主的控制台里不一定要得见
-  const file = config?.debug ? join(config?.workspaceRoot ?? process.cwd(), 'dsh-qq-debug.log') : ''
-  const fileLog = file
-    ? (level, args) => {
-        try {
-          appendFileSync(
-            file,
-            `${new Date().toISOString()} [${level}] ${args.map((a) => (typeof a === 'string' ? a : safeJson(a))).join(' ')}\n`,
-          )
-        } catch {
-          /* 日志失败不影响主流程 */
-        }
+  // 日志一定要落盘。宿主是 Electron 的 GUI 子进程，启动脚本那边就算做了
+  // -RedirectStandardOutput，拿到的也是 0 字节——「它为什么不说话」这种问题
+  // 只能靠插件自己写文件。按天一个，放 <workspaceRoot>/logs/，和部署脚本的 logs 同一个家。
+  const dir = join(config?.workspaceRoot ?? process.cwd(), 'logs')
+  const fileLog = (level, args) => {
+    try {
+      if (!ensuredLogDirs.has(dir)) {
+        mkdirSync(dir, { recursive: true })
+        ensuredLogDirs.add(dir)
       }
-    : null
+      const now = new Date()
+      const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+      appendFileSync(join(dir, `dsh-qq-${day}.log`), `${localStamp(now)} [${level}] ${args.map(formatArg).join(' ')}\n`, 'utf8')
+    } catch {
+      /* 日志失败不影响主流程 */
+    }
+  }
   const wrap = (level) => (fn) => (...args) => {
-    fileLog?.(level, args)
+    fileLog(level, args)
     return typeof fn === 'function' ? fn(prefix, ...args) : undefined
   }
   return {
@@ -216,8 +238,12 @@ export function apply(ctx, config) {
   questions.install(ctx)
 
   const contextGuard = createContextGuard({ manager, config, logger })
-  const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard })
-  const outbound = createOutbound({ manager, config, logger, send })
+  const wake = createWake({ config, manager, logger })
+  const bedtime = createSleep({ config, manager, logger })
+  // 睡着的会话不回收：回收后 tick/wake 都遍历不到它，早上攒的消息就交不出去
+  manager.keeper = (record) => bedtime.isHolding(record)
+  const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime })
+  const outbound = createOutbound({ manager, config, logger, send, wake })
 
   const offSessionEvent = ctx.on('session/event', outbound)
   const offGuardEvent = ctx.on('session/event', contextGuard.onSessionEvent)
@@ -249,8 +275,14 @@ export function apply(ctx, config) {
   client.on('error', (err) => logger.warn('连接错误:', err?.message ?? err))
 
   client.start()
+  wake.start()
+  bedtime.start()
 
-  registerTools(ctx, { client, manager, config, logger })
+  try {
+    registerTools(ctx, { client, manager, config, logger })
+  } catch (err) {
+    logger.warn('QQ 互动工具注册失败（聊天本身不受影响）:', err?.message ?? err)
+  }
 
   // ── 设置页接口：/api/dsh-qq/* ─────────────────────────────────────────────
   // DSH 设置界面里那一页（client.js）打的就是这几个口。
@@ -265,6 +297,8 @@ export function apply(ctx, config) {
       /* ignore */
     }
     client.stop()
+    wake.stop()
+    bedtime.stop()
     manager.stop()
     approval.cancelAll()
     questions.cancelAll()
