@@ -47,12 +47,14 @@ const guard = createContextGuard({ manager, config, logger })
 guard.onSessionEvent({ header: { id: 's1' } }, { type: 'request/context', data: { contextWindow: 100000 } })
 assert.equal(record.contextWindow, 100000)
 
-// 2) assistant/message 记压力（prompt = input + cacheRead，再加 output）
+// 2) assistant/message 记压力（prompt = input + cacheRead；**不含 output**）
+//    设计上只看「下一轮要重新付钱的输入」：output 是这轮刚生成的，
+//    下一轮不一定整段回灌，算进去会高估压力、提前换会话（见 context-guard.js:65-66）。
 guard.onSessionEvent(
   { header: { id: 's1' } },
   { type: 'assistant/message', data: { usage: { inputTokens: 500, cacheReadTokens: 9500, outputTokens: 100 } } },
 )
-assert.equal(record.promptTokens, 10100)
+assert.equal(record.promptTokens, 10000)
 
 // 3) 压缩结束：规矩标记重置 + 注入短卡
 guard.onSessionEvent({ header: { id: 's1' } }, { type: 'compaction/end', data: {} })
@@ -61,7 +63,8 @@ assert.equal(injected.length, 1)
 assert.match(injected[0].content[0].text, /压缩/)
 assert.equal(record.compactedCount, 1)
 
-// 4) 阈值以下：不换
+// 4) 阈值以下：不换（测试 config 的 minTokens=1000，先压到 500）
+record.promptTokens = 500
 assert.equal(await guard.maybeSwap(record), null)
 
 // 5) 超阈值：换会话，返回 seed

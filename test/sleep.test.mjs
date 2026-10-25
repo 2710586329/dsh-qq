@@ -75,6 +75,8 @@ function fakeRecord(label, scope = 'private') {
 function makeConfig(over = {}) {
   return {
     sleepMode: true,
+    // 测试的是「夜里捂住」这条路径；线上的默认值现在是 false（半夜说话说明她醒了）
+    holdNightMessages: true,
     bedtimeAt: '23:30',
     sleepFrom: '00:00',
     sleepTo: '08:00',

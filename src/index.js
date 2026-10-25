@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, mkdirSync, statSync, watchFile, unwatchFile } from 'node:fs'
 import { join } from 'node:path'
 import { ConfigSchema } from './config.js'
 import { OneBotClient } from './onebot/client.js'
@@ -20,6 +20,7 @@ import {
   installSettingsApi,
   loadOverrides,
   resolvePersonaFile,
+  settingsFileOf,
 } from './settings.js'
 
 export const name = 'dsh-qq'
@@ -85,6 +86,82 @@ function safeJson(v) {
 }
 
 /**
+ * 分离部署下的热生效：盯着 `settings.json`。
+ *
+ * 为什么需要（2026-10-25 姐姐发现）：
+ * 设置页保存走的是 `POST /api/dsh-qq/settings`，`applyOverrides` 就地改的是
+ * **处理那次请求的那个进程**里的 config。可这套部署是分开的——
+ * desktop profile 里 dsh-qq 只有 `uiOnly: true`（设置面板），真正跑 QQ 的是
+ * 另一个 `--profile qqbot` 的进程。面板改完，跑 QQ 那边根本收不到那次请求。
+ *
+ * 表现：用户在设置里改了群白名单 / 触发方式，机器人在线、却还是老规矩，
+ * 必须手动重启 qqbot 宿主才生效。发布出去这一条会被当成「设置不生效」。
+ *
+ * 解法就是盯文件：另一个进程写盘 → 这里轮询到 mtime 变了 → 重读覆盖表 → 就地应用。
+ * 用 `watchFile`（轮询）而不是 `fs.watch`，因为它**容忍文件不存在**（首次还没有
+ * settings.json 时 watch 会直接报错），而且跨进程写盘在 Windows 上事件不可靠。
+ */
+export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger) {
+  let file = ''
+  try {
+    file = settingsFileOf(ctx, logger)
+  } catch (err) {
+    logger?.warn?.('拿不到 settings.json 路径，跳过热加载:', err?.message ?? err)
+    return
+  }
+  let lastMtimeMs = 0
+  try {
+    lastMtimeMs = statSync(file).mtimeMs
+  } catch {
+    /* 文件还不存在，正常 */
+  }
+
+  const reload = () => {
+    try {
+      const next = loadOverrides(ctx, logger)
+      const applied = applyOverrides(config, next, logger)
+      if (overridesRef?.current) {
+        for (const key of Object.keys(overridesRef.current)) delete overridesRef.current[key]
+        Object.assign(overridesRef.current, next)
+      }
+      if (personaRef) personaRef.current = resolvePersonaFile(config, logger)
+      logger.info(
+        applied.length > 0
+          ? `settings.json 变了，已就地应用: ${applied.join(', ')}（不用重启）`
+          : 'settings.json 变了，但没有可覆盖的键',
+      )
+    } catch (err) {
+      logger?.warn?.('重读 settings.json 失败:', err?.message ?? err)
+    }
+  }
+
+  try {
+    watchFile(file, { interval: 800 }, (cur) => {
+      if (!cur || !cur.mtimeMs) return
+      if (cur.mtimeMs === lastMtimeMs) return
+      lastMtimeMs = cur.mtimeMs
+      reload()
+    })
+  } catch (err) {
+    logger?.warn?.('盯 settings.json 失败（热加载不可用）:', err?.message ?? err)
+    return
+  }
+
+  // 插件卸载时把轮询停掉，别在宿主里留一个永远转的定时器
+  try {
+    if (typeof ctx.on === 'function') ctx.on('dispose', () => {
+      try {
+        unwatchFile(file)
+      } catch {
+        /* 已经没了就算了 */
+      }
+    })
+  } catch {
+    /* 没有 dispose 语义的极简宿主，忽略 */
+  }
+}
+
+/**
  * 把 QQ（OneBot 11 / NapCat）当成 DSH 的一个前端：
  * 私聊 / 群聊各对应一个持久 Agent 会话，消息进来 followup，回复走 session/event 出去。
  */
@@ -99,6 +176,9 @@ export function apply(ctx, config) {
   const overridesRef = { current: savedOverrides }
   const personaRef = { current: resolvePersonaFile(config, logger) }
   const agents = ctx?.agents
+
+  // 另一个进程（设置面板）改了 settings.json 时，这边自己跟上，不用重启宿主
+  watchSettingsFile(ctx, config, overridesRef, personaRef, logger)
 
   // 设置页接口：**运行时注入** webServer，而不是写进顶层 `export const inject`。
   // 有网页服务的宿主（Desktop / Web GUI）才会回调进来；headless 的 qqbot 永远不回调，

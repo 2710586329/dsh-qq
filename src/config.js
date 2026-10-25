@@ -114,6 +114,26 @@ export const ConfigSchema = Schema.object({
     .default([])
     .description('privateMode=allowlist 时生效的 QQ 号列表'),
 
+  // ── 主动说话的「冷会话拉回」（2026-10-25 加）──
+  // 会话闲置太久会被回收出内存；主动说话轮只看得见内存里的会话，
+  // 冷掉之后就永远不会主动开口了。开着 = 每轮先把它拉回来。
+  wakeColdSessions: Schema.boolean()
+    .default(false)
+    .description(
+      '主动说话前把白名单里的私聊会话拉回内存（关着 = 只有对方先说话，这个会话才会被主动说话轮看见）',
+    ),
+  wakeColdMax: Schema.number()
+    .default(3)
+    .description('每次最多拉回几个冷会话（防止一次唤醒太多、吃内存和 token）'),
+
+  // ── 回收（2026-10-25 修）──
+  // 私聊的「安静 20 分钟」和「闲置 30 分钟回收」只差 10 分钟，
+  // 姐姐一忙、会话一回收，主动说话轮就够不着它，一整天等不到一次主动开口。
+  // 群聊保持 sessionIdleTimeout 原值（人多、会话便宜回收）。
+  privateIdleTimeout: Schema.number()
+    .default(12 * 3_600_000)
+    .description('私聊会话闲置多久回收出内存，单位毫秒，默认 12 小时；群聊仍用 sessionIdleTimeout'),
+
   // ── 图片 ──
   faceCollectHint: Schema.string()
     .default('')
@@ -205,6 +225,13 @@ export const ConfigSchema = Schema.object({
   goodnightWords: Schema.string()
     .default('晚安,睡了,睡觉,去睡,我先睡,困了,睡啦')
     .description('说到这些词就当她说晚安了，之后不再回消息直到睡醒。逗号分隔'),
+  // ⭐ 2026-10-25：默认不按住——姐姐半夜说话通常就是她醒了，正常回。
+  // 想让她「夜里真的静音、消息留到早上」的话，把这个打开。
+  holdNightMessages: Schema.boolean()
+    .default(false)
+    .description(
+      '休息时段（sleepFrom~sleepTo）和说完晚安后，私聊消息先捂着、早上再一起回；关着 = 照常回（姐姐半夜说话说明她醒了）',
+    ),
 
   // ── 连发合并 ──
   mergeWindowMs: Schema.number()

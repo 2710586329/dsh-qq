@@ -165,7 +165,10 @@ export class SessionManager {
       recent: [],
       // ⭐ 2026-10-25：交接优先从内存拿（/reset 当场存的）；内存没有、又是换过代的会话，
       // 就从磁盘的 `交接.md` 再读一次 —— 这样「reset 完宿主刚好重启」也不会把交接丢掉。
-      swapSeed: this.#seedByKey.get(baseKey) ?? (gen > 0 ? loadHandoffFor({ dir: attached.cwd }) || null : null),
+      // ⭐ 2026-10-25 20:52：`#attach` 因为磁盘上留了恢复不出来的空壳而换了 id 时，也算「换过代」
+      // ——不然新会话永远是个空壳，把交接卡漏掉（今晚就是这么漏的）。
+      swapSeed: this.#seedByKey.get(baseKey)
+        ?? ((gen > 0 || actualId !== sessionId) ? loadHandoffFor({ dir: attached.cwd }) || null : null),
       chatPromptInjected: false,
     }
     this.#seedByKey.delete(baseKey)
@@ -285,10 +288,16 @@ export class SessionManager {
   }
 
   #sweep() {
-    const ttl = Number(this.config.sessionIdleTimeout) || 1_800_000
+    const baseTtl = Number(this.config.sessionIdleTimeout) || 1_800_000
+    // ⭐ 2026-10-25 修：私聊给长得多的闲置期（默认 12 小时）。
+    // 原因：主动说话的「安静 20 分钟」和回收的「闲置 30 分钟」只差 10 分钟，
+    // 姐姐一忙、会话一回收，wake.tick 就够不着它，一整天都等不到一次主动开口。
+    // 群聊保持原值 —— 群里人多、会话便宜回收，没必要常驻。
+    const privateTtl = Math.max(baseTtl, Number(this.config.privateIdleTimeout) || 12 * 3_600_000)
     const now = Date.now()
     for (const [sessionId, record] of this.#records) {
       if (record.busy > 0) continue
+      const ttl = record.scope === 'private' ? privateTtl : baseTtl
       if (now - record.lastActive <= ttl) continue
       // ⭐ 2026-10-25 修：睡着/攒着消息的会话别回收。
       // 回收后 sleep.tick 和 wake.tick 都只遍历 list()，够不着它 —— 夜里攒的话第二天没人交，

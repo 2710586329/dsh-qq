@@ -79,13 +79,16 @@ export function createWake({ config, manager, logger }) {
     st.misses = 0
   }
 
-  /** 自己发了消息：也算一次活动（不然刚说完就被判冷场），并且把「上一次主动」的计时往后推。 */
+  /** 自己发了消息：也算一次活动（不然刚说完就被判冷场）。 */
   function noteOutbound(record) {
     if (!record?.sessionId) return
     const st = stateOf(record)
     st.lastAt = Date.now()
-    // 刚开口说过话就往后推一推，别隔几分钟又问一遍（她 2026-10-25 提的）
-    st.lastProactiveAt = Date.now()
+    // 注意：这里**不能**动 lastProactiveAt。
+    // 她回姐姐一句话不等于「她主动开口过」——只有 fire() 真给了机会才算。
+    // 2026-10-25 修：原来这里把每次回复都当成主动说话，导致
+    // 「安静 20 分钟该开口」被「说完话要等 30 分钟」顶掉，而会话 30 分钟就被回收，
+    // 三个阈值刚好卡死，整天都等不到一次机会。
   }
 
   /** 会话被回收/重置时把状态一起丢掉。 */
@@ -129,13 +132,48 @@ export function createWake({ config, manager, logger }) {
     })
   }
 
+  /**
+   * 冷会话拉回（2026-10-25 加）。
+   * 会话闲置久了会被回收出内存，主动说话轮只遍历 manager.list()，
+   * 冷掉之后就永远轮不到它 —— 变成「对方不说话，它就不主动」。
+   * 默认关；本地在 config 里把 wakeColdSessions 打开，发布版留给用户自己选。
+   */
+  let reviving = false
+  async function reviveCold() {
+    if (config?.wakeColdSessions !== true) return
+    if (reviving) return
+    reviving = true
+    try {
+      const peers = Array.isArray(config?.privateAllow) ? config.privateAllow : []
+      const max = Math.max(1, Number(config?.wakeColdMax) || 3)
+      const hot = new Set(manager.list().map((r) => `${r.scope}:${String(r.peerId)}`))
+      let n = 0
+      for (const raw of peers) {
+        if (n >= max) break
+        const peerId = String(raw)
+        if (hot.has(`private:${peerId}`)) continue
+        try {
+          await manager.obtain({ scope: 'private', peerId, label: `私聊 ${peerId}` })
+          n += 1
+          logger.info?.(`[dsh-qq] 拉回冷会话 私聊 ${peerId}（主动说话要用）`)
+        } catch (err) {
+          logger.warn?.(`[dsh-qq] 拉回冷会话失败 ${peerId}:`, err)
+        }
+      }
+    } finally {
+      reviving = false
+    }
+  }
+
   /** 一分钟看一遍：谁安静够久了、能不能开口。 */
-  function tick(now = new Date()) {
+  async function tick(now = new Date()) {
     if (stopped) return
     if (config?.proactiveEnabled === false) return
     const quota = maxPerDay()
     if (quota === 0) return
     if (inQuietHours(parseQuietHours(config?.proactiveQuietHours), now)) return
+
+    await reviveCold()
 
     const limit = silentMs()
     for (const record of manager.list()) {

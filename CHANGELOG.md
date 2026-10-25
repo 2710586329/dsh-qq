@@ -2,6 +2,27 @@
 
 本文件记录 dsh-qq 的版本变更。格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号照 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.1.0] - 2026-10-25
+
+### 新增
+
+- **冷会话拉回**（`wakeColdSessions`，默认关；`wakeColdMax` 默认 3）：会话闲置久了会被回收出内存，而主动说话轮只看得见内存里的会话——冷掉之后就永远不会主动开口。开着时每轮先把它拉回来，最多一次拉 `wakeColdMax` 个。
+- **私聊闲置期单独算**（`privateIdleTimeout`，默认 12 小时）：原来主动说话的「安静 20 分钟」和回收的「闲置 30 分钟」只差 10 分钟，姐姐一忙、会话一回收，主动说话轮就够不着它。群聊仍用 `sessionIdleTimeout` 原值。
+- **`settings.json` 跨进程热生效**：另一个进程（设置页、编辑器、脚本）改了 `settings.json`，插件 800ms 内重新读入并就地应用，不用重启宿主。改人设文件同理。
+- **私人日记**：会话目录上一级的 `私人/YYYY-MM-DD.md`，一天一篇，只给鲸鲸自己看——用户不看、别的会话也读不到。
+
+### 修复
+
+- **主动说话整天不开口**：`noteOutbound` 把每次回复都当成「主动说过话了」，计时一直往后推，永远等不到那 20 分钟。现在只记真正主动说出口的那句。
+- **交接卡漏掉**：会话文件坏了、`#attach` 换了新 id 时，`swapSeed` 只认「换代次数 > 0」，新会话成了空壳、读不到磁盘上的交接。现在 id 变了也算换代。
+- **`holdNightMessages` 没暴露**：1.0.0 的 CHANGELOG 写了这个开关，`config.js` 里却没有——设置页既不显示也改不了。现在补上，默认 `false`（半夜说话就是她醒了）。
+
+### 测试
+
+- 新增 `test/settings-watch.test.mjs`（5 项：文件不存在 / 写盘生效 / 再改再生效 / 坏 JSON / 未知键过滤）。
+- `context-guard`、`sleep` 的过时断言跟上实现（`promptTokens` 不含 output、阈值前置、夜间开关）。
+- `e2e` / `context-guard` / `sleep` / `wake` / `settings-watch` 全绿。
+
 ## [1.0.1] - 2026-10-25
 
 ### 修复
