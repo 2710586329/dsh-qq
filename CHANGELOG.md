@@ -2,6 +2,18 @@
 
 本文件记录 dsh-qq 的版本变更。格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号照 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.1.2] - 2026-10-26
+
+### 修复
+
+- **设置页在桌面版 DSH 0.2.x 上不显示（1.1.1「已知限制」里的那一条，真因找到了）**：1.0.0 为了能发到 npm，把 `package.json` 的 `name` 从 `dsh-qq` 改成了 `dsh-qq-onebot`，但两处硬编码没跟着改名——`client.js` 里的 `window.__ModuleLoader__.load({ id: 'dsh-qq' })` 和 `cordis.patch.yml` 里的 `name: 'dsh-qq'`。DSH 0.2.x 的 `@deepseek-ai/dsh-client-modules` 把 **manifest 包名当作浏览器模块的身份**（`nearestPackage()` 要求 `package.json.name` 等于加载条目的 specifier），名字对不上就 `resolveMeta()` 返回 null，这条 client row 根本不进启动图，而且**静默跳过**——「设置 → 插件 → 插件列表」里连一条失败记录都没有，所以之前一直查不出来。现在三处统一成 `dsh-qq-onebot`（`package.json` 的 `name`、`client.js` 的 `id`、bundle patch 的 `name`），并在 `client.js` 里留了注释说明这三个名字必须一致。
+  - **升级提醒**：如果你当年是手动把插件目录复制/软链成 `node_modules/dsh-qq`（旧名）装的，请把它改名为 `node_modules/dsh-qq-onebot` 再重启，否则加载条目还是解析不到。（用 `dsh plugin add dsh-qq-onebot` 装的不用管，目录名本来就是包名。）
+- **睡前提醒「忙的时候先记账，然后永远不补」**：`tick` 到点时如果那一轮会话正忙（或者刚好占用着），原先是先记账再投递，投递失败也不回滚——当晚就再也不催了。现在改成「忙时先不记账」，在补发窗口内（默认 30 分钟，`LATE_BED_WINDOW_MIN`）再找一次空档补上；窗口过了就作废，不会半夜突然冒出来催睡。另外补了两条边界：`asleep` 后醒来清掉标记、跨天清去重表。
+
+### 测试
+
+- `node test/sleep.test.mjs` 46 项全过（新增 4b「到点时会话正忙」、4c「过了补发窗口就不补了」）；`node test/e2e.mjs` 全过。
+
 ## [1.1.1] - 2026-10-26
 
 ### 新增

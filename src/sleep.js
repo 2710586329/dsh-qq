@@ -16,6 +16,11 @@ import { bedtimeRule, morningRule } from './prompts.js'
 
 const TICK_MS = 60_000
 const FIRE_TIMEOUT_MS = 300_000
+/**
+ * 到点那一分钟没送出去（会话正忙 / 内存里刚好没会话），还能补发多久。
+ * 过了这段就不补——半夜一点再去催睡没意义。
+ */
+const LATE_BED_WINDOW_MIN = 30
 
 /** "23:30" → 1410；写错了给 null（当没设）。 */
 export function parseHm(text) {
@@ -237,11 +242,17 @@ export function createSleep({ config, manager, logger }) {
       const bed = bedtimeAt()
       if (bed === null || asleep) continue
       if (st.sleeping && now.getTime() < st.wakeAt) continue
-      if (minutesOf(now) !== bed) continue
+      // ⭐ 2026-10-26 修（两处）：
+      //   ① 原来要求「刚好这一分钟」（minutesOf(now) !== bed），会话忙 / 内存里还没建会话
+      //      就整分钟跳过去，今天再也不提醒；现在给 30 分钟补发窗口（跨午夜用模运算）。
+      //   ② 原来先把 remindedOn 记上再判 busy——忙的时候等于「标成提醒过却没发」。
+      //      现在忙就先不记账，等它空下来补。
+      const late = (minutesOf(now) - bed + 1440) % 1440
+      if (late >= LATE_BED_WINDOW_MIN) continue
       const dk = dayKey(now)
       if (st.remindedOn === dk) continue
-      st.remindedOn = dk
       if (record.busy > 0) continue
+      st.remindedOn = dk
       logger.info?.(`[dsh-qq] ${record.label} 到 ${hmText(bed)} 了，提醒她去睡`)
       fire(record, bedtimeRule(config, { label: record.label, now, clock: hmText(bed) }), '睡前提醒')
     }

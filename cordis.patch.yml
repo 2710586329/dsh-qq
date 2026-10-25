@@ -10,7 +10,9 @@
 
 - insert:
     - id: dsh-qq
-      name: 'dsh-qq'
+      # ⚠️ 必须等于 package.json 的 name：0.2.x 的 client-modules 用 manifest 包名
+      # 当浏览器模块身份，name 对不上就整条 client row 进不了启动图（设置页消失）。
+      name: 'dsh-qq-onebot'
       config:
         # ── 连接 ──
         wsUrl: 'ws://127.0.0.1:3001'

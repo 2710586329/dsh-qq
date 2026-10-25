@@ -153,6 +153,41 @@ const textOf = (message) => message?.content?.[0]?.text ?? ''
   s.stop()
 }
 
+// 4b) 到点时会话正忙：先别记账，等它空下来补（2026-10-26 修）
+{
+  const r = fakeRecord('私聊忙')
+  const m = fakeManager([r])
+  m.capture(r)
+  const s = createSleep({ config: makeConfig(), manager: m, logger: {} })
+  s.start()
+  r.busy = 1
+  s.tick(new Date(2026, 9, 25, 23, 30))
+  await new Promise((r2) => setTimeout(r2, 10))
+  check('忙的时候不投递', m.delivered.length, 0)
+  r.busy = 0
+  s.tick(new Date(2026, 9, 25, 23, 32))
+  await new Promise((r2) => setTimeout(r2, 10))
+  check('空下来补发这一次', m.delivered.length, 1)
+  check('补的仍是睡前提醒', textOf(m.delivered[0]).includes('该睡'), true)
+  s.tick(new Date(2026, 9, 25, 23, 33))
+  await new Promise((r2) => setTimeout(r2, 10))
+  check('补完不再念第二遍', m.delivered.length, 1)
+  s.stop()
+}
+
+// 4c) 过了补发窗口（默认 30 分钟）就不补了，免得半夜催睡
+{
+  const r = fakeRecord('私聊晚')
+  const m = fakeManager([r])
+  m.capture(r)
+  const s = createSleep({ config: makeConfig({ bedtimeAt: '21:00' }), manager: m, logger: {} })
+  s.start()
+  s.tick(new Date(2026, 9, 25, 21, 40))
+  await new Promise((r2) => setTimeout(r2, 10))
+  check('过了 30 分钟不再催睡', m.delivered.length, 0)
+  s.stop()
+}
+
 // 5) 总开关关掉：什么都不做
 {
   const r = fakeRecord('私聊戊')

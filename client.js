@@ -17,7 +17,10 @@
  * ============================================================================
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-qq',
+  // ⚠️ 这里的 id 必须等于 package.json 的 name（浏览器模块身份 = manifest 包名）。
+  // 1.0.0 起包名从 dsh-qq 改成 dsh-qq-onebot，这里漏改，0.2.x 上整条 client row
+  // 就对不上、设置页不出现。别再手滑。
+  id: 'dsh-qq-onebot',
   factory: (require) => {
     const React = require('react')
     const h = React.createElement
