@@ -135,12 +135,25 @@ window.__ModuleLoader__.load({
         hint ? h('div', { 'data-qq-note': '' }, hint) : null)
     }
 
+    // 人设文件读没读到要常驻显示：读不到最容易「悄悄变普通助手」，
+    // 只留一句日志 warn 的话，人在设置页上是看不见的。
+    function personaNote(p) {
+      if (!p || !p.file) return null
+      return h('div', { 'data-qq-note': '' },
+        p.ok
+          ? `✓ 当前从 ${p.file} 读入 ${p.chars} 字（上面的文本框不生效）`
+          : p.fromCache
+            ? `⚠️ 这个文件读不到（${p.error || '文件不存在'}），用的是上次读到的那份缓存（${p.chars} 字）`
+            : `⚠️ 这个文件读不到（${p.error || '文件不存在'}），现在用的是上面的文本框`)
+    }
+
     function Panel() {
       const [st, setSt] = useState(null)
       const [val, setVal] = useState(null)
       const [busy, setBusy] = useState('')
       const [msg, setMsg] = useState(null)
       const [draft, setDraft] = useState({})
+      const [persona, setPersona] = useState(null)
 
       const load = useCallback(async () => {
         try {
@@ -148,6 +161,7 @@ window.__ModuleLoader__.load({
           setSt(s)
           setVal(cfg.values)
           setDraft({})
+          setPersona(cfg.persona ?? null)
         } catch (e) {
           setMsg({ text: '读设置失败：' + e.message, tone: 'warn' })
         }
@@ -170,6 +184,7 @@ window.__ModuleLoader__.load({
           const r = await jpost('/settings', { patch: body })
           setVal(r.values)
           setDraft({})
+          if (r.persona) setPersona({ ...r.persona })
           const tail = r.needReconnect ? '（点右边「重连」生效）' : r.needRestart ? '（有几项要重启宿主才生效）' : ''
           let text = `${label} 已保存${tail}`
           if (r.persona && r.persona.file) {
@@ -322,6 +337,7 @@ window.__ModuleLoader__.load({
             mono: true,
             placeholder: 'D:/某个角色.md（留空 = 只用上面的文本框）',
           }),
+          personaNote(persona),
           textField('ownerLabel', '在群里怎么称呼主人', { hint: '例如「老板」「老大」。', placeholder: '主人' })),
 
         /* ── 补充提示词 ── */

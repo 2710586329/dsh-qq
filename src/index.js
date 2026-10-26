@@ -8,6 +8,8 @@ import { createInbound, historyLine, pushHistory } from './inbound.js'
 import { appendChatLog } from './chatlog.js'
 import { SILENT_MARKER, personaLeaks } from './prompts.js'
 import { createOutbound } from './outbound.js'
+import { createBridge } from './bridge.js'
+import { createPin } from './pin.js'
 import { createWake } from './wake.js'
 import { createSleep } from './sleep.js'
 import { startLearning } from './learning.js'
@@ -19,11 +21,14 @@ import { ApprovalChannel } from './approval.js'
 import { QuestionChannel } from './questions.js'
 import {
   applyOverrides,
+  ensureSettingsFile,
+  homeDirOf,
   installSettingsApi,
   loadOverrides,
   resolvePersonaFile,
   settingsFileOf,
 } from './settings.js'
+import { selfCheckClient } from './client-selfcheck.js'
 
 export const name = 'dsh-qq'
 export const inject = ['agents']
@@ -127,9 +132,9 @@ export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger)
         Object.assign(overridesRef.current, next)
       }
       if (personaRef) {
-        personaRef.current = resolvePersonaFile(config, logger)
+        personaRef.current = resolvePersonaFile(config, logger, { home: homeDirOf(ctx, logger) })
         try {
-          const leak = personaLeaks(personaRef.current)
+          const leak = personaLeaks(config?.persona)
           if (!leak.ok) {
             logger.warn(`人设里出现了工具用法（${leak.hits.join('、')}）——这些属于行为层，人设只该写「我是谁」。`)
           }
@@ -184,13 +189,19 @@ export function apply(ctx, config) {
   const appliedOverrides = applyOverrides(config, savedOverrides)
   const logger = makeLogger(ctx, config)
   if (appliedOverrides.length > 0) logger.info(`已应用设置页覆盖: ${appliedOverrides.join(', ')}`)
+
+  // 第一次启动就落一份骨架 settings.json（设置页没上场时，用户手里唯一的入口）
+  ensureSettingsFile(ctx, logger)
+  // 客户端半端自检：id 对不上 / inject 为空时，宿主会**静默跳过整条 client bundle**，
+  // 设置里就看不到 QQ（2026-10-25 踩过两次，issue #2 第 1 条）
+  selfCheckClient(logger)
   // 设置页保存后要就地刷新这两份状态：persona 可能换了文件，覆盖表可能变了
   const overridesRef = { current: savedOverrides }
-  const personaRef = { current: resolvePersonaFile(config, logger) }
+  const personaRef = { current: resolvePersonaFile(config, logger, { home: homeDirOf(ctx, logger) }) }
 
   // 两层提示词的边界检查：人设里混进工具名，日志留痕但不阻止（怎么写是人家的自由）。
   try {
-    const leak = personaLeaks(personaRef.current)
+    const leak = personaLeaks(config?.persona)
     if (!leak.ok) {
       logger.warn(
         `人设里出现了工具用法（${leak.hits.join('、')}）——这些属于行为层，人设只该写「我是谁」。` +
@@ -234,6 +245,14 @@ export function apply(ctx, config) {
     return
   }
 
+  // 没配地址就别说「在重连」——直接告诉人家改哪个文件
+  if (!String(config.wsUrl ?? '').trim()) {
+    logger.warn(
+      `还没配 NapCat 的 WebSocket 地址（wsUrl），QQ 不会连上。` +
+        `去设置 → QQ 里填，或改 ${settingsFileOf(ctx, logger)}；保存后约 800ms 自动生效。`,
+    )
+  }
+
   const client = new OneBotClient({
     url: config.wsUrl,
     token: config.accessToken,
@@ -244,6 +263,10 @@ export function apply(ctx, config) {
   let selfId = String(config.selfId ?? '')
   const manager = new SessionManager({ agents, selfId, config, logger })
   manager.start()
+
+  // 通道回执：断线 / 发送失败要让她知道（见 bridge.js 顶部那段起因）
+  const bridge = createBridge({ config, logger, manager })
+const pin = createPin({ config, logger })
 
   // 每个会话最近 60 秒的发消息时间戳 —— 防「回得太快」被风控
   const sentLog = new Map()
@@ -271,6 +294,8 @@ export function apply(ctx, config) {
     const trimmed = String(text ?? '').trim()
     if (trimmed === SILENT_MARKER) {
       logger.info(`[dsh-qq] ${record.label} 选择不接话（${SILENT_MARKER}）`)
+      // 沉默不该扣主动开口的额度：机会白给，她想开口的话下次还有（2026-10-26）
+      wake.noteProactiveSilent(record)
       return
     }
     const chunks = splitText(text, config.textChunkLimit)
@@ -317,9 +342,13 @@ export function apply(ctx, config) {
         const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
         if (sentId > 0) record.lastSentMessageId = sentId
         sentAny = true
+        // 真发出去了才算用掉一次主动开口的额度（回复不受影响：pending 只在主动轮有）
+        wake.noteProactiveDelivered(record)
         logger.info(`→ ${record.label}: ${chunks[index].slice(0, 60)}`)
       } catch (err) {
         logger.warn(`发送到 ${record.label} 失败:`, err?.message ?? err)
+        // 回执：这句没送出去。下一轮投递时会告诉她「是通道断了，不是对方不理你」。
+        bridge.noteSendFailure(record, chunks[index], err)
         break
       }
       if (index < chunks.length - 1) await sleep(config.splitDelayMs)
@@ -357,11 +386,11 @@ export function apply(ctx, config) {
   questions.install(ctx)
 
   const contextGuard = createContextGuard({ manager, config, logger })
-  const wake = createWake({ config, manager, logger })
+  const wake = createWake({ config, manager, logger, bridge, pin })
   const bedtime = createSleep({ config, manager, logger })
   // 睡着的会话不回收：回收后 tick/wake 都遍历不到它，早上攒的消息就交不出去
   manager.keeper = (record) => bedtime.isHolding(record)
-  const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime })
+  const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime, bridge, pin })
   const outbound = createOutbound({ manager, config, logger, send, wake })
 
   // 群黑话 / 角色知识学习：每 20 分钟扫一次群聊记录，把「鲸鲸自己卡壳」的地方
@@ -381,6 +410,8 @@ export function apply(ctx, config) {
 
   client.on('open', async () => {
     logger.info(`已连接 ${config.wsUrl}`)
+    // 断过又连回来：只有「断线期间真丢过话」的会话才记一笔，等下一轮投递告知
+    bridge.markUp()
     try {
       // 就算配置里写死了 selfId，也要问一次昵称：历史行里「你（昵称）」得写对，
       // 不然它认不出哪个是自己发的。
@@ -398,7 +429,10 @@ export function apply(ctx, config) {
     }
   })
 
-  client.on('close', () => logger.warn('与 NapCat 断开，稍后自动重连'))
+  client.on('close', () => {
+    bridge.markDown()
+    logger.warn('与 NapCat 断开，稍后自动重连')
+  })
   client.on('error', (err) => logger.warn('连接错误:', err?.message ?? err))
 
   client.start()
@@ -406,7 +440,7 @@ export function apply(ctx, config) {
   bedtime.start()
 
   try {
-    registerTools(ctx, { client, manager, config, logger })
+    registerTools(ctx, { client, manager, config, logger, pin })
   } catch (err) {
     logger.warn('QQ 互动工具注册失败（聊天本身不受影响）:', err?.message ?? err)
   }

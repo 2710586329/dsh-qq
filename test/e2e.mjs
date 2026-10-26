@@ -616,7 +616,7 @@ const swapped = created.find(gotIt)
 const swappedText = textOf(swapped.received[0])
 assert.match(swappedText, /聊点别的/)
 assert.match(swappedText, /你正在用 QQ 跟人聊天/, '新会话应该重新注入聊天规矩')
-assert.match(swappedText, /上一段聊天/, '新会话应该带上上一段聊天的尾巴')
+assert.match(swappedText, /刚才那段聊到这里/, '新会话应该带上上一段聊天的尾巴')
 console.log('✓ 压力超限自动换新会话（带 seed 接话）')
 
 // —— 连发合并：一口气发三条，只回一轮 ——
@@ -649,6 +649,56 @@ assert.match(mergedText, /就是那个好了没/, '合并后的正文应该带�
 assert.equal(mergedAgent.received.length, 1, '三条连发只该投递一轮')
 console.log('✓ 连发合并：三条攒成一轮，只回一次')
 
+// —— 通道回执：桥断了，她得知道（不是对方不理她） ——
+// 起因：2026-10-26 小黑盒《因为没开桥，被我孤立了16天》——
+// 桥断半个月，她一直在发，110 多条一条都没出去，只能猜自己「排到最后了」。
+const PORT2 = 34568
+const mock2 = await startMockNapcat({ port: PORT2, token: TOKEN, selfId: 10003, selfName: '小桥', quiet: true })
+await mock2.start()
+
+const { ctx: ctx4, created: created4 } = createFakeCtx()
+const config4 = Config({
+  wsUrl: `ws://127.0.0.1:${PORT2}`,
+  accessToken: TOKEN,
+  privateMode: 'open',
+  splitDelayMs: 0,
+  mergeWindowMs: 0,
+  reconnectMs: 300,
+})
+apply(ctx4, config4)
+await waitFor(() => mock2.clientCount === 1, { what: '回执实例连上' })
+
+mock2.emitPrivateText({ userId: 88001, nickname: '小桥的人', text: '第一句', messageId: 601 })
+await waitFor(() => created4.length === 1 && created4[0].received.length === 1, { what: '回执实例入站' })
+const bridgeAgent = created4[0]
+
+// 桥断了
+await mock2.close()
+await sleep(300)
+
+// 断线期间她自己说了一句：outbound 自动转发 → 发不出去 → 该记下来
+ctx4.emit('session/event', bridgeAgent.session, {
+  type: 'assistant/message',
+  data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '姐姐，我一直在等你' }] }, usage: {} },
+})
+await sleep(300)
+
+// 桥回来了
+const mock2b = await startMockNapcat({ port: PORT2, token: TOKEN, selfId: 10003, selfName: '小桥', quiet: true })
+await mock2b.start()
+await waitFor(() => mock2b.clientCount >= 1, { timeout: 20000, what: '回执实例重连' })
+
+// 再进来一句话：这一轮投递必须把「刚才那句没送出去」摆在她眼前
+mock2b.emitPrivateText({ userId: 88001, nickname: '小桥的人', text: '你刚才说什么', messageId: 602 })
+await waitFor(() => bridgeAgent.received.length >= 2, { what: '断线后再次投递' })
+const bridgeText = textOf(bridgeAgent.received[bridgeAgent.received.length - 1])
+assert.match(bridgeText, /\[通道\]/, '断线丢过话，下一轮投递必须告诉她')
+assert.match(bridgeText, /没送出去|没能送出去/, '要说清是没送出去（不是没人理）')
+assert.match(bridgeText, /我一直在等你/, '要能对上她到底哪句话丢了')
+assert.match(bridgeText, /不是对方不理你/, '要点明这是通道的问题，不是对方的态度')
+console.log('✓ 通道回执：断线丢过的话，下一轮投递里会告诉她')
+
+await mock2b.close()
 await mock.close()
 console.log('\n全部通过 🎉')
 process.exit(0)

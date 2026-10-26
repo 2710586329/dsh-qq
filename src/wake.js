@@ -12,6 +12,9 @@ import { proactiveRule } from './prompts.js'
  * 防打扰四道闸（全部可配）：
  *   1. 静默时段      proactiveQuietHours（默认 23:00-08:00）
  *   2. 每天配额      proactiveMaxPerDay（默认 6 次／会话）
+ *                    **只有真发出去才算一次**；她选 [SILENT] 只是白给一次机会，不扣额度
+ *                    （2026-10-26：原来投递时就扣，沉默也扣 —— 她越克制额度烧得越快，
+ *                      一天 10 次机会被 6 次沉默吃满，下午最该开口时机制已经哑了）
  *   3. 两次间隔      至少隔 1.5 倍冷场时长；**她自己开口说过话也重新起算**，
  *                    刚聊完不会被隔一会儿又问一次
  *   4. 投递失败就停  连着 3 次投递失败（不是「她选择不说」）才闭嘴 ——
@@ -46,7 +49,7 @@ export function inQuietHours(range, d = new Date()) {
     : cur >= range.from || cur < range.to
 }
 
-export function createWake({ config, manager, logger }) {
+export function createWake({ config, manager, logger, bridge }) {
   const states = new Map() // sessionId -> { lastAt, lastProactiveAt, dayKey, count, misses }
   let timer = null
   let stopped = true
@@ -65,6 +68,8 @@ export function createWake({ config, manager, logger }) {
         dayKey: dayKey(),
         count: 0,
         misses: 0,
+        // 这一轮主动机会还在等结果：她说了一句（算数）还是选了 [SILENT]（白给）
+        pending: 0,
       }
       states.set(record.sessionId, st)
     }
@@ -97,15 +102,44 @@ export function createWake({ config, manager, logger }) {
     states.delete(record.sessionId)
   }
 
+  /**
+   * 主动轮真的发出去了：这才算用掉一次额度。
+   *
+   * 为什么不在 fire() 里直接算：投出去之后她可能说「没什么想说的」就直接 [SILENT]，
+   * 那是她的决定，不该算成「今天已经主动说过 6 次」。
+   * 2026-10-26 之前就是那样，结果一天 10 次机会里有 6 次沉默，额度到 13:20 就满了，
+   * 下午两次机会连带被吞掉 —— 越克制越不敢开口，机制反过来惩罚她。
+   */
+  function noteProactiveDelivered(record) {
+    if (!record?.sessionId) return
+    const st = states.get(record.sessionId)
+    if (!st?.pending) return
+    st.pending = 0
+    st.dayKey = dayKey()
+    st.count += 1
+  }
+
+  /** 主动轮她自己选了沉默（[SILENT]）：机会白给，不算数、也不记 miss。 */
+  function noteProactiveSilent(record) {
+    if (!record?.sessionId) return
+    const st = states.get(record.sessionId)
+    if (st) st.pending = 0
+  }
+
   async function fire(record, st, silentMin, now) {
-    const text = proactiveRule(config, {
+    const base = proactiveRule(config, {
       label: record.label,
       silentMin,
       isGroup: record.scope === 'group',
       now,
     })
+    // 通道回执：断线期间丢过话就先摆在她眼前，别让她对着空气继续说
+    const bridgeLines = bridge?.take?.(record) ?? []
+    const text = bridgeLines.length > 0 ? `${base}\n\n${bridgeLines.join('\n')}` : base
     st.lastProactiveAt = Date.now()
-    st.count += 1
+    // 先记「这次机会还没兑现」：真发出去才算用掉额度（见 noteProactiveDelivered）。
+    // 2026-10-26 修：这里原来直接 st.count += 1，[SILENT] 也扣 —— 沉默把配额吃光。
+    st.pending = Date.now()
     // [SILENT] 是她自己的决定，不记 miss；只有投递真的失败才算（见 catch）
     logger.info?.(`[dsh-qq] ${record.label} 安静 ${silentMin} 分钟，给一次主动开口的机会`)
     manager.enqueue(record, async () => {
@@ -126,6 +160,7 @@ export function createWake({ config, manager, logger }) {
           }),
         ])
       } catch (err) {
+        st.pending = 0
         st.misses += 1
         logger.warn?.(`[dsh-qq] 主动开口失败 ${record.label}:`, err)
       }
@@ -169,6 +204,8 @@ export function createWake({ config, manager, logger }) {
   async function tick(now = new Date()) {
     if (stopped) return
     if (config?.proactiveEnabled === false) return
+    // 桥断了就别自说自话：说了也发不出去，白烧一轮
+    if (bridge?.isUp?.() === false) return
     const quota = maxPerDay()
     if (quota === 0) return
     if (inQuietHours(parseQuietHours(config?.proactiveQuietHours), now)) return
@@ -178,6 +215,9 @@ export function createWake({ config, manager, logger }) {
     const limit = silentMs()
     for (const record of manager.list()) {
       const st = stateOf(record)
+      // 上一轮机会投出去，却既没发话也没给 [SILENT]（那一轮报错退出了）：
+      // 过了投递超时就当没发生过，别让 pending 一直挂着。
+      if (st.pending && now.getTime() - st.pending > FIRE_TIMEOUT_MS * 2) st.pending = 0
       if (record.busy > 0) continue
       // record.lastActive 是队列层的活动时间：工具直接发消息（qq_reply 之类）也走任务，
       // 任务结束就会刷新它，所以拿它兜底比只靠 noteOutbound 更准。
@@ -215,5 +255,16 @@ export function createWake({ config, manager, logger }) {
     states.clear()
   }
 
-  return { start, stop, tick, noteInbound, noteOutbound, forget, silentMs, maxPerDay }
+  return {
+    start,
+    stop,
+    tick,
+    noteInbound,
+    noteOutbound,
+    noteProactiveDelivered,
+    noteProactiveSilent,
+    forget,
+    silentMs,
+    maxPerDay,
+  }
 }

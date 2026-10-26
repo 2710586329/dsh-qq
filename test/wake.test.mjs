@@ -148,6 +148,37 @@ function makeConfig(over = {}) {
   w.stop()
 }
 
+// 4b) 沉默不占额度（2026-10-26 修：原来投递时就扣，[SILENT] 也算一次）
+{
+  const r = fakeRecord('克制的', 60 * 60 * 1000)
+  const m = fakeManager([r])
+  const w = createWake({ config: makeConfig({ proactiveMaxPerDay: 1 }), manager: m, logger: {} })
+  w.start()
+  w.tick()
+  await new Promise((r2) => setTimeout(r2, 10))
+  w.noteProactiveSilent(r) // 她选了 [SILENT]
+  // 默认冷场 20 分钟 ⇒ 两次机会至少隔 30 分钟（limit × 1.5），跳 31 分钟
+  w.tick(new Date(Date.now() + 31 * 60_000))
+  await new Promise((r2) => setTimeout(r2, 10))
+  check('沉默不占额度，后面还能再给机会', m.fired, ['克制的', '克制的'])
+  w.stop()
+}
+
+// 4c) 真发出去才算用掉一次
+{
+  const r = fakeRecord('说过的', 60 * 60 * 1000)
+  const m = fakeManager([r])
+  const w = createWake({ config: makeConfig({ proactiveMaxPerDay: 1 }), manager: m, logger: {} })
+  w.start()
+  w.tick()
+  await new Promise((r2) => setTimeout(r2, 10))
+  w.noteProactiveDelivered(r) // 真发了一句
+  w.tick(new Date(Date.now() + 31 * 60_000))
+  await new Promise((r2) => setTimeout(r2, 10))
+  check('说过一次后配额就满了', m.fired, ['说过的'])
+  w.stop()
+}
+
 // 5) 开关关掉
 {
   const r = fakeRecord('关掉的', 60 * 60 * 1000)
@@ -176,6 +207,7 @@ function makeConfig(over = {}) {
   check('提示词带安静时长', groupText.includes('安静了 32 分钟'), true)
   check('提示词带时间段', groupText.includes('晚上（20:40）'), true)
   check('提示词允许不说', groupText.includes('[SILENT]'), true)
+  check('提示词里落了「先发，没回当在忙」', groupText.includes('不用先猜她在忙'), true)
   const privateText = proactiveRule({}, { label: '私聊', silentMin: 45, isGroup: false, now: new Date(2026, 9, 24, 8, 5) })
   check('私聊措辞不同', privateText.includes('对方有一阵子没动静'), true)
   check('上午时段', privateText.includes('上午（08:05）'), true)

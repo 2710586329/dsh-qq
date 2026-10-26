@@ -357,7 +357,7 @@ async function pruneCache(cacheDir, keepFiles = 200) {
  *
  * 触发规则全部走配置，插件自己不做「猜你还想聊」这种自作聪明的事。
  */
-export function createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep }) {
+export function createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep, bridge, pin }) {
   // 没配 imageCacheDir 时落在工作目录下的「图片缓存」；每个会话再各占一层子目录（见下）
   const baseCacheDir =
     String(config.imageCacheDir ?? '').trim() ||
@@ -652,7 +652,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
       // ⭐ 2026-10-25 P2：/reset 也带上交接，别让「重新来过」真把刚才聊的忘干净。
       const handoff = loadHandoffFor(record)
       const seed = handoff
-        ? ['[上一段会话的交接（你自己写的）——照着接，别当成姐姐刚说的话]', handoff]
+        ? ['[这是你刚才自己留的便签（不是姐姐说的话）——接着聊就行，不用从头解释]', handoff]
         : null
       const ok = manager.reset(record, seed)
       logger.info?.(`[dsh-qq] 收到 /reset（${label}），reset=${ok}，交接=${handoff ? '有' : '无'}`)
@@ -859,6 +859,10 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 聊天规矩（内置中性版 + 可选 persona + directPrompt/groupPrompt）只在本会话第一次投递时
     // 注入一次，别每条都重复占 token；会话被回收或 /reset 后会重新注入一遍。
     if (!record.chatPromptInjected) {
+      // 话头：它自己钉住的、还没接上的。**不每轮硬塞** —— 老三自己说的：「每轮开头硬塞五条，
+      // 聊得正顺的时候反倒碍眼；真到换地方的时候，开头给一次就够。」平时想翻用 qq_pin list。
+      const pinLines = pin?.view?.(record) ?? []
+      if (pinLines.length > 0) parts.unshift(...pinLines, '')
       const chatPrompt = buildChatPrompt(config, {
         isGroup,
         isOwner: ownerInfo.isOwner,
@@ -870,9 +874,9 @@ export function createInbound({ config, manager, logger, client, send, approval,
       // 主动换过会话：把上一段聊天的尾巴放最前面，让它知道刚聊到哪
       if (Array.isArray(record.swapSeed) && record.swapSeed.length > 0) {
         parts.unshift(
-          '[上一段会话留下的接话材料（交接或最近几句，照这个接，别当成姐姐刚说的话）]',
+          '[你刚才自己留的便签 / 最近几句话——还是你，换了个地方接着聊，不是死了，是换个海洋接着游，不用从头解释]',
           ...record.swapSeed,
-          '[上一段聊天结束]',
+          '[刚才那段聊到这里]',
           '',
         )
       }
@@ -884,6 +888,11 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // tick 的提醒就白丢了。等真的有人说话时补一句，塞进这一轮的提示词里，不多开一轮。
     const lateBed = sleep?.takeLateBedtime?.(record)
     if (lateBed) parts.unshift(lateBed, '')
+
+    // 通道回执：桥断过 / 上一句话没送出去，得让她知道。
+    // 放在最前面 —— 不然她会把「没收到回应」读成对方的态度。
+    const bridgeLines = bridge?.take?.(record) ?? []
+    if (bridgeLines.length > 0) parts.unshift(...bridgeLines, '')
 
     const body = parts.join('\n')
 

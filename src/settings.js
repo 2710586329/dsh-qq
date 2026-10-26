@@ -121,6 +121,36 @@ export function settingsFileOf(ctx, logger) {
   return join(homeDirOf(ctx, logger), 'settings.json')
 }
 
+/**
+ * 第一次启动就落一份**带说明的骨架** settings.json（issue #2 第 4 条）。
+ *
+ * 为什么：设置页没上场时（浏览器半端没加载），用户手里得有一样「看得到、
+ * 改得动」的东西，而不是对着 README 自己拼路径。文件不存在才写，绝不覆盖；
+ * 骨架里只有一条 `//` 说明键，**不写 wsUrl/accessToken 的默认值**——
+ * 写了会把 profile 里 cordis.patch.yml 配好的连接覆盖掉（骨架变成事故）。
+ * `//` 不在 OVERRIDABLE 名单里，读的时候会被静默忽略。
+ */
+export function ensureSettingsFile(ctx, logger) {
+  const file = settingsFileOf(ctx, logger)
+  try {
+    if (existsSync(file)) return { ok: true, created: false, file }
+    const skeleton = {
+      '//':
+        '这是 dsh-qq 的设置覆盖文件：只写你想改的键，下面的模板复制进这个对象就能用（把这一行 // 删掉）：\n' +
+        '  "wsUrl": "ws://127.0.0.1:3001",\n' +
+        '  "accessToken": "你自己的 token",\n' +
+        '  "selfId": "机器人 QQ 号"\n' +
+        '改完保存，约 800ms 自动生效，不用重启宿主。',
+    }
+    writeFileSync(file, `${JSON.stringify(skeleton, null, 2)}\n`, 'utf8')
+    logger?.info?.(`已生成设置骨架 ${file}（文件不存在时才写，不覆盖已有配置）`)
+    return { ok: true, created: true, file }
+  } catch (err) {
+    logger?.warn?.(`创建 ${file} 失败:`, err?.message ?? err)
+    return { ok: false, created: false, file, error: err?.message ?? String(err) }
+  }
+}
+
 /** 读覆盖表；坏文件当空的，不让一个坏 JSON 把插件拖住。 */
 export function loadOverrides(ctx, logger) {
   const file = settingsFileOf(ctx, logger)
@@ -183,23 +213,53 @@ export function applyOverrides(config, overrides, logger) {
 
 /**
  * 「人设地址」：配了 `personaFile` 就从那个文件读人设，读到了就盖掉 `persona`。
- * 读不到**不报错也不清空**——保留 `persona` 原值，只 warn 一句，免得一次手滑把角色弄没。
- * @returns {{ ok: boolean, file?: string, chars?: number, error?: string }}
+ *
+ * 读不到时两级兜底（2026-10-26 姐姐说「人设文件那个地方加个兜底」）：
+ *   ① 文本框（`persona`）里还有字 → 继续用它；
+ *   ② 文本框也是空的（常见：人设全放在文件里）→ 用**上次成功读到的那份缓存**
+ *      `$DSH_HOME/dsh-qq/persona-cache.md`。没有这一级的话，文件名一改、一删，
+ *      角色就悄无声息变回「一个没有名字的普通助手」，而日志里只有一行 warn。
+ * @returns {{ ok: boolean, file?: string, chars?: number, error?: string, fromCache?: boolean }}
  */
-export function resolvePersonaFile(config, logger) {
+export function resolvePersonaFile(config, logger, { home = '' } = {}) {
   const raw = String(config?.personaFile ?? '').trim()
   if (!raw) return { ok: false }
   const file = resolve(raw)
+  const cacheFile = home ? join(home, 'persona-cache.md') : ''
   try {
     if (!existsSync(file)) throw new Error('文件不存在')
     const text = readFileSync(file, 'utf8').trim()
     if (!text) throw new Error('文件是空的')
     config.persona = text
+    if (cacheFile) {
+      try {
+        mkdirSync(dirname(cacheFile), { recursive: true })
+        writeFileSync(cacheFile, text, 'utf8')
+      } catch {
+        /* 缓存写不进去不影响这次的人设 */
+      }
+    }
     logger?.info?.(`人设从 ${file} 读入（${text.length} 字）`)
     return { ok: true, file, chars: text.length }
   } catch (err) {
-    logger?.warn?.(`人设文件读不到（${file}），继续用 persona 字段:`, err?.message ?? err)
-    return { ok: false, file, error: err?.message ?? String(err) }
+    const msg = err?.message ?? String(err)
+    let fromCache = false
+    if (!String(config?.persona ?? '').trim() && cacheFile && existsSync(cacheFile)) {
+      try {
+        const cached = readFileSync(cacheFile, 'utf8').trim()
+        if (cached) {
+          config.persona = cached
+          fromCache = true
+        }
+      } catch {
+        /* 缓存坏了就当没有 */
+      }
+    }
+    logger?.warn?.(
+      `人设文件读不到（${file}）：${msg}` +
+        (fromCache ? '，用的是上次读到的那份缓存（persona-cache.md）' : '，继续用 persona 字段'),
+    )
+    return { ok: false, file, error: msg, fromCache }
   }
 }
 
@@ -278,9 +338,12 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       selfId: (manager?.selfId || String(config.selfId ?? '')) || '',
       selfName: manager?.selfName || '',
       persona: {
+        ok: Boolean(personaRef?.current?.ok),
         fromFile: Boolean(personaRef?.current?.ok),
+        fromCache: Boolean(personaRef?.current?.fromCache),
         file: personaRef?.current?.file ?? String(config.personaFile ?? ''),
         chars: String(config.persona ?? '').length,
+        error: personaRef?.current?.error ?? '',
       },
       home: info.home,
       settingsFile: info.file,
@@ -334,7 +397,7 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
         Object.assign(overridesRef.current, saved.overrides)
       }
       applyOverrides(config, saved.overrides, logger)
-      const personaNow = resolvePersonaFile(config, logger)
+      const personaNow = resolvePersonaFile(config, logger, { home: homeDirOf(ctx, logger) })
       if (personaRef) personaRef.current = personaNow
 
       const touched = (key) => Object.prototype.hasOwnProperty.call(patch, key)
@@ -455,20 +518,26 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
  * 读失败（文件没有/没权限）一律返回空串——事实卡丢了也不能耽误聊天。
  */
 /**
- * 这个会话自己写的「交接」——换会话时接话用。
+ * 这个会话自己写的「便签」——换会话时接话用。
  * 空文件/只有标题的不算。
+ *
+ * 2026-10-26：原来叫 `交接.md`，姐姐说「太像遗书了」。改成 `便签.md` 优先；
+ * 旧名继续读，别把之前已经写下的东西丢掉。
  */
 export function loadHandoffFor(record) {
   const dir = String(record?.dir ?? '').trim()
   if (!dir) return ''
-  try {
-    const file = join(dir, '交接.md')
-    if (!existsSync(file)) return ''
-    const text = readFileSync(file, 'utf8').trim()
-    return text.replace(/^#.*$/gm, '').trim().length >= 20 ? text : ''
-  } catch {
-    return ''
+  for (const name of ['便签.md', '交接.md']) {
+    try {
+      const file = join(dir, name)
+      if (!existsSync(file)) continue
+      const text = readFileSync(file, 'utf8').trim()
+      if (text.replace(/^#.*$/gm, '').trim().length >= 20) return text
+    } catch {
+      // 读失败就换下一个名字；两个都读不到也不是大事，退回原文兜底
+    }
   }
+  return ''
 }
 
 /** 事实卡文件的完整路径（会话目录的上一级）。发布版不写死某台机器的路径。 */

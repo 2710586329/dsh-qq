@@ -43,6 +43,8 @@
 | Token | 自己编一串，比如 `my-token-2026` |
 | 消息格式 | `array`（重要，别选 string） |
 
+> ⚠️ **NapCat 的 QQ 和你桌面的 QQ 是两套程序。** 重装 / 重启 NapCat 时别用 `Get-Process -Name QQ | Stop-Process` 一把全杀——那会把自己正在用的 QQ 也踢下线。按进程路径挑，或者在 NapCat 自己的托盘 / WebUI 里退。
+
 ### 2. 装插件
 
 **先把 DSH 完全退出**（托盘也要退掉，插件文件被占用会装到一半失败）。
@@ -80,7 +82,22 @@ dsh plugin --profile desktop why dsh-qq-onebot
 
 重新打开 DSH → **设置 → QQ**，把 `wsUrl` 和 `accessToken` 填进去就行（34 项都在那个面板上，改完即时生效）。
 
-想直接写配置文件也可以，改 `$DSH_HOME/profiles/desktop/cordis.patch.yml` 里 `dsh-qq` 那一段（整段替换，不是往下叠）：
+> **设置里没看到 QQ 这一项？** 别慌，不用等修——两条路都能救。
+>
+> **① 直接写设置文件**（不用重启宿主）：`$DSH_HOME/dsh-qq/settings.json`，Windows 一般是 `C:\Users\<用户名>\.dsh\dsh-qq\settings.json`。插件第一次启动时会在那儿放一份带说明的骨架，改成：
+>
+> ```json
+> {
+>   "wsUrl": "ws://127.0.0.1:3001",
+>   "accessToken": "my-token-2026"
+> }
+> ```
+>
+> 保存后约 **800ms 自动生效**。
+>
+> **② 看日志找原因**：插件启动时会自检浏览器半端，日志里有 `客户端半端自检通过：id=...` 就是好的；如果是 `客户端半端自检失败（client-id-mismatch / no-inject ...）`，那句话本身就说明了设置页为什么没出现。日志在 `<workspaceRoot>/logs/dsh-qq-<日期>.log`（`workspaceRoot` 默认是进程 cwd）。也可以看 `$DSH_HOME/dsh-qq/` 下有没有东西——**一个文件都没有**，通常就是浏览器半端根本没被加载。
+
+想直接写 profile 配置也可以，改 `$DSH_HOME/profiles/desktop/cordis.patch.yml` 里 `dsh-qq` 那一段（整段替换，不是往下叠）：
 
 ```yaml
 - id: dsh-qq
@@ -143,7 +160,23 @@ dsh plugin --profile desktop why dsh-qq-onebot
 
 同一个 QQ 号不能两处同时登录（会互相抢消息），所以桌面 / Web GUI 那份配 `uiOnly: true`：只提供设置页，不连 NapCat；真正干活的是 `--profile qqbot` 那个宿主。
 
+## 和别的 OneBot 插件共存
+
+一台 NapCat 的 WebSocket 一般只该被**一个** Agent 连着。社区的 `dsh-onebot-hub` 之类也连同一台 NapCat 时，两边都会收到同一条消息、各自回一遍——表现是「回复错乱」「一条消息两份回复」，不是任何一边的 bug。
+
+**只留一个：**
+
+```powershell
+dsh plugin --profile desktop remove dsh-onebot-hub
+# 再确认 profile 的 package.json 里 dsh.profile.bundles 已经没有它
+```
+
+搬家到 dsh-qq 时顺手清一下旧家的状态目录（不清也不影响，只是留着占地方）：`$DSH_HOME` 下旧插件自己的目录。dsh-qq 的家是 `$DSH_HOME/dsh-qq/`，卸载插件时这个目录**不会**自动删，设置、日志、覆盖表都在里面，留着下次重装能直接用。
+
 ## 常见问题
+
+**设置里没有「QQ」这一项**
+浏览器半端没被加载。最常见两个原因：插件版本太老（1.1.1 之前的 `dsh.client.inject` 写了宿主要么没有的包），或者装的是改过包名却没跟着改 `client.js` 里 `id` 的版本。**现在不用等更新**：连上 NapCat 只看设置文件的话，改 `$DSH_HOME/dsh-qq/settings.json` 就够了（见上面第 3 步的兜底），QQ 本身不依赖设置页。插件启动日志里搜 `客户端半端自检`，它会把原因写在里面。
 
 **连不上 / 一直重连**
 看 NapCat 的 WebUI 里 WS 服务器是不是「启用」，端口对不对，Token 两边是否一模一样。插件日志里 `连接错误` 后面会带具体原因。

@@ -60,18 +60,115 @@ const LEAK_LINE = [
   /^I (?:should|will|'ll|need to)\b/i,
 ]
 
+/**
+ * 行首那一串英文小标签（`Good.` `2 lines.` `Hmm `）是模型的自评，不是话。
+ * 它常常和中文粘在同一行：`Good.本姑娘这边显示是发出去了`——整行删会把话也删掉，
+ * 所以先剥掉前缀，再交给 LEAK_LINE 判整行。
+ */
+const LEAD_LABEL = /^(?:[A-Za-z0-9][A-Za-z0-9'’]*[.。:!?,、]?\s*)+/
+
+/** 最长公共子序列的长度——用来判两段是不是「同一句换了几个字」。 */
+function lcsLength(a, b) {
+  const n = a.length
+  const m = b.length
+  if (!n || !m) return 0
+  let prev = new Array(m + 1).fill(0)
+  for (let i = 1; i <= n; i += 1) {
+    const cur = new Array(m + 1).fill(0)
+    for (let j = 1; j <= m; j += 1) {
+      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1])
+    }
+    prev = cur
+  }
+  return prev[m]
+}
+
+/**
+ * 模型有时把同一段话写两遍（第二遍只改几个字），2026-10-26 17:14 和 17:25 各一次。
+ * 按段落去重：跟已经收下的某段相似度 ≥70% 就丢掉。
+ */
+function collapseRepeats(text) {
+  const paras = text.split(/\n\s*\n/)
+  const out = []
+  for (const p of paras) {
+    const t = p.trim()
+    if (!t) continue
+    const dup = out.some((q) => {
+      const short = Math.min(t.length, q.length)
+      if (short < 8) return false
+      return lcsLength(t, q) / short >= 0.7
+    })
+    if (!dup) out.push(t)
+  }
+  return out.join('\n\n').trim()
+}
+
 export function stripLeakedThinking(text) {
   if (!text) return text
-  const kept = text.split('\n').filter((line) => {
-    const t = line.trim()
-    if (!t) return true
-    return !LEAK_LINE.some((re) => re.test(t))
+  const kept = text.split('\n').map((line) => {
+    let t = line.trim()
+    if (!t) return ''
+    // 整行就是一句自评（`Hmm 这句要短一点。`）→ 整行丢掉
+    if (LEAK_LINE.some((re) => re.test(t))) return ''
+    // 只是行首粘了个英文小标签（`Good.本姑娘这边显示是发出去了`）→ 剥掉标签，话留下
+    const lead = LEAD_LABEL.exec(t)
+    if (lead) {
+      const rest = t.slice(lead[0].length).trim()
+      return rest
+    }
+    return t
   })
-  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+  return collapseRepeats(kept.join('\n').replace(/\n{3,}/g, '\n\n').trim())
 }
 
 /** 太短不算一句，避免「嗯。」单独发一条。 */
 const MIN_SENTENCE = 6
+
+/** 按流式同样的边界把整段切成句子，用来算「哪几句已经发过了」。 */
+function splitSentences(text) {
+  const out = []
+  let rest = String(text ?? '')
+  while (rest) {
+    const m = SENTENCE_END.exec(rest)
+    if (!m) break
+    out.push(m[1])
+    rest = rest.slice(m[0].length)
+  }
+  if (rest.trim()) out.push(rest)
+  return out
+}
+
+/** 这一段里有几个汉字——用来判断一段话是不是「人话」。 */
+function cjkCount(text) {
+  return (String(text).match(/[\u4e00-\u9fa5]/g) ?? []).length
+}
+
+/**
+ * 模型偶尔把答案整个写进 reasoning 通道，text 块是空的。
+ * 2026-10-26 17:15:24 和 17:16:06 各一次：turn 正常结束，QQ 上一个字都没有，
+ * 因为 extractText() 只认 text 块，拿到空串就直接 return 了。
+ * 这种情况下退回去取 reasoning 的最后一段当正文——总比整条不回好。
+ */
+export function reasoningTail(message) {
+  const content = message?.content
+  if (!Array.isArray(content)) return ''
+  const parts = []
+  for (const part of content) {
+    if (part?.type === 'reasoning' && typeof part.text === 'string') parts.push(part.text)
+  }
+  if (parts.length === 0) return ''
+  const paragraphs = parts
+    .join('\n\n')
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+  // 从最后往前看三段，挑第一段像人话的（汉字够多）
+  for (let i = paragraphs.length - 1; i >= 0 && i >= paragraphs.length - 3; i -= 1) {
+    const clean = stripLeakedThinking(paragraphs[i])
+    if (clean && cjkCount(clean) >= 4) return clean
+  }
+  return ''
+}
 
 /**
  * 这些工具**自己就会把话发出去**。
@@ -149,18 +246,20 @@ export function createOutbound({ manager, config, logger, send, wake }) {
         resetStream(sessionId)
         return
       }
-      const text = stripLeakedThinking(extractText(data.message))
+      let text = stripLeakedThinking(extractText(data.message))
+      // 模型偶尔把答案整个写进 reasoning，text 块是空的（2026-10-26 17:15、17:16 各一次：
+      // turn 正常结束，QQ 那边一个字都没收到）。退回去取 reasoning 的尾段当正文。
+      if (!text) text = reasoningTail(data.message)
       if (!text) return
 
-      const streamed = streamBuf.get(sessionId) ?? ''
+      const already = streamCount.get(sessionId) ?? 0
       resetStream(sessionId)
 
-      // 流式已经发出去过一段：只补没发的那部分
-      if (streamed) {
-        const tail = text.endsWith(streamed.trim())
-          ? text.slice(0, text.length - streamed.trim().length).trim()
-          : (text.startsWith(streamed.trim()) ? text.slice(streamed.trim().length).trim() : text)
-        if (tail) await emit(record, tail)
+      // 流式已经发出去过几句：只补后面没发的，别把发过的再发一遍
+      // （2026-10-26 17:25 的窟窿：原来拿「没发出去的尾巴」去比，结果把前两句又发了一遍）
+      if (already > 0) {
+        const rest = splitSentences(text).slice(already).join('')
+        if (rest) await emit(record, rest)
         lastSent.set(sessionId, text)
         return
       }

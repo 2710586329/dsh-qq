@@ -112,9 +112,16 @@ t('空 / null 不炸', () => {
 })
 
 console.log('两层提示词 · 场景差异')
-t('私聊有交接、群聊没有', () => {
-  assert.ok(buildChatPrompt({}, { isGroup: false }).includes('【交接'))
-  assert.ok(!buildChatPrompt({}, { isGroup: true }).includes('【交接'))
+t('私聊有便签规矩、群聊没有', () => {
+  assert.ok(buildChatPrompt({}, { isGroup: false }).includes('【便签'))
+  assert.ok(!buildChatPrompt({}, { isGroup: true }).includes('【便签'))
+})
+
+t('便签规矩说清了「不是遗书」，并给了旧名兜底', () => {
+  const p = buildChatPrompt({}, { isGroup: false })
+  assert.ok(p.includes('不是遗书'), '得把「这不是遗书」说出口')
+  assert.ok(p.includes('便签.md'), '新文件名要写对')
+  assert.ok(!p.includes('【交接（换会话时用）】'), '旧标题不该再出现')
 })
 
 t('群聊有身份规矩，私聊没有', () => {
