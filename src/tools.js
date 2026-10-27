@@ -168,7 +168,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     parameters: {
       type: 'object',
       properties: {
-        group: { type: 'string', description: '群号（纯数字），比如 580579694' },
+        group: { type: 'string', description: '群号（纯数字），比如 123456789' },
         word: { type: 'string', description: '那个词 / 说法本身' },
         meaning: { type: 'string', description: '它的意思（一句话，用自己的话，别抄别人）' },
         who: { type: 'string', description: '从谁那儿听来的（可空）' },
@@ -238,7 +238,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     async execute(args) {
       try {
         const word = String(args?.word ?? '').trim()
-        const r = await lookupMeme(word, { full: Boolean(args?.full) })
+        const r = await lookupMeme(word, { dbPath: config.memeDb || undefined, full: Boolean(args?.full) })
         if (!r.found) {
           return {
             found: false,

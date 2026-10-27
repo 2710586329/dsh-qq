@@ -553,8 +553,8 @@ export function loadFactsFor(record) {
   try {
     const file = factsFileFor(record)
     if (!existsSync(file)) return ''
-    // ⚠️ 2026-10-25 修：`record.label` 是「私聊 普瑞赛斯(希儿)(2710586329)」这种给人看的，
-    // 不是目录名「私聊_2710586329」。拿 label 去匹配只匹配到「全局」节，
+    // ⚠️ 2026-10-25 修：`record.label` 是「私聊 某某(1234567)」这种给人看的，
+    // 不是目录名「私聊_1234567」。拿 label 去匹配只匹配到「全局」节，
     // 会话节整节丢掉（LLM 看到的卡断在「姐姐最近在忙」那行）。目录名才是稳定键。
     return pickFacts(readFileSync(file, 'utf8'), basename(dir))
   } catch {
@@ -610,7 +610,7 @@ function clipLine(s, limit) {
   return `${t.slice(0, limit)}…`
 }
 
-/** 聊天记录一行的样子：`- 00:08:57 · 昵称(3027160989)：说话内容`。 */
+/** 聊天记录一行的样子：`- 00:08:57 · 昵称(10002)：说话内容`。 */
 const CHAT_LINE_RE = /^- (\d{2}:\d{2}:\d{2}) · (.+?)\((\d{3,12})\)[：:]\s*(.*)$/
 
 /**

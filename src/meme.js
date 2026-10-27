@@ -1,8 +1,8 @@
 /**
  * 查梗（2026-10-27 加）。
  *
- * 姐姐从 AstrBot 那个「梗百科」插件里拿了一份词库快照过来（没装插件，只借数据）：
- * `D:\鲸鲸的专用文件\tools\梗库\memes.db`，6668 条，cnmeme.wiki 2026-10-26 19:07 的快照。
+ * 词库是一份 cnmeme.wiki 的 sqlite 快照（6668 条，2026-10-26 19:07 建的库）。
+ * 路径不写死在代码里：从配置 `memeDb` 或环境变量 `DSH_QQ_MEME_DB` 读，没配就让工具如实说「没配词库」。
  *
  * 为什么做成工具而不是一条命令行：
  *   老三在 QQ 里**敲不动 shell**（她那套内建 bash 有静默空结果的毛病，跑了也看不见），
@@ -14,7 +14,7 @@
 
 import { existsSync } from 'node:fs'
 
-export const DEFAULT_MEME_DB = 'D:\\鲸鲸的专用文件\\tools\\梗库\\memes.db'
+export const DEFAULT_MEME_DB = String(process.env.DSH_QQ_MEME_DB ?? '').trim()
 
 const USAGE_CLIP = 600
 const ORIGIN_CLIP = 450
@@ -52,8 +52,17 @@ function clip(s, n, full) {
 export async function lookupMeme(query, { dbPath = DEFAULT_MEME_DB, full = false } = {}) {
   const q = String(query ?? '').trim()
   if (!q) return { found: false, query: q }
-  if (!existsSync(dbPath)) {
-    const err = new Error(`词库不在：${dbPath}`)
+  const dbFile = String(dbPath ?? '').trim()
+  if (!dbFile) {
+    const err = new Error(
+      '没配梗词库。这个工具要一份 cnmeme.wiki 的 sqlite 快照：' +
+        '把路径填进设置里的 memeDb（或设环境变量 DSH_QQ_MEME_DB）。没有的话就按自己知道的说，别编出处。',
+    )
+    err.code = 'MEME_DB_MISSING'
+    throw err
+  }
+  if (!existsSync(dbFile)) {
+    const err = new Error(`词库不在：${dbFile}`)
     err.code = 'MEME_DB_MISSING'
     throw err
   }
@@ -62,7 +71,7 @@ export async function lookupMeme(query, { dbPath = DEFAULT_MEME_DB, full = false
 
   // 每次查询开一个只读连接、用完立刻关：Windows 上不占句柄，换库不用重启
   // （人家 1.5.2 就栽在这 —— 缓存连接害得更新插件报 WinError 32）
-  const db = new DatabaseSync(dbPath, { readOnly: true })
+  const db = new DatabaseSync(dbFile, { readOnly: true })
   try {
     const exact = db.prepare('SELECT title,slug,tags,usage,origin,other FROM memes WHERE title = ?')
     let row = exact.get(q)

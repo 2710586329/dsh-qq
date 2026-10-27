@@ -15,11 +15,31 @@
  *    `import.meta.resolve('@deepseek-ai/dsh-api-remotes')` 在 profile 目录和插件目录
  *    **都失败**（这些包打进 app.asar，由宿主浏览器的模块加载器处理）。
  *    拿它当判据只会每次都误报，把真问题淹掉。
+ *
+ * 3. inject 里出现已知的**废弃包名**（老文档抄来的那种，如裸的 `dsh-client-runtime`）
+ *    ——不 resolve，只按名字比对，所以不会误报。这类名字宿主同样会静默跳过。
  * ============================================================================
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+/**
+ * 已知的废弃 inject 包名 → 正确写法。只比对名字，不 resolve，所以不会有「本机没装就误报」。
+ *
+ * ⚠️ 只认**不带 scope 的裸名**：正确写法 `@deepseek-ai/dsh-client-runtime` 剥掉 scope 后
+ * 和废弃的裸名一模一样，按包名剥 scope 比对会把正确写法也判错（第一版就这么写了，测试抓住的）。
+ */
+const DEPRECATED_INJECT = new Map([
+  ['dsh-client-runtime', '@deepseek-ai/dsh-client-runtime'],
+  ['dsh-client', '@deepseek-ai/dsh-client'],
+])
+
+/** 带 scope 的是新写法，不进废弃名单比对；只有裸名才去查。 */
+function bareName(spec) {
+  const name = String(spec ?? '').trim()
+  return name.startsWith('@') ? null : name
+}
 
 /**
  * 从 client.js 源码里抠出 `__ModuleLoader__.load({ id: '...' })` 的 id。取不到返回 null。
@@ -74,6 +94,18 @@ export function inspectBundle({ pkgText, clientText } = {}) {
         code: 'no-inject',
         message: 'dsh.client.inject 是空的 —— 浏览器半端没有可依赖的宿主模块，装不上设置页',
       })
+    }
+
+    for (const spec of info.inject) {
+      const good = DEPRECATED_INJECT.get(bareName(spec))
+      if (good) {
+        problems.push({
+          code: 'deprecated-inject',
+          message:
+            `dsh.client.inject 里有废弃的包名「${spec}」——宿主认不出，会整条跳过 client bundle；` +
+            `换成「${good}」`,
+        })
+      }
     }
   }
 

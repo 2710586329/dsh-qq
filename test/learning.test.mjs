@@ -24,10 +24,10 @@ function t(name, fn) {
 }
 
 const SELF = '1737661812'
-const LOG = `- 22:27:03 · 七音(819050169)：汽水是老夫（）
+const LOG = `- 22:27:03 · 甲(20001)：汽水是老夫（）
 - 22:27:44 · 水仙女人鱼(1737661812)：认不出
 - 22:28:01 · 水仙女人鱼(1737661812)：好啊
-- 22:31:00 · 普瑞赛斯(2710586329)：大肥鱼，这白毛是谁
+- 22:31:00 · 路人甲(10001)：大肥鱼，这白毛是谁
 - 22:31:05 · 水仙女人鱼(1737661812)：啥意思呀
 `
 
@@ -35,7 +35,7 @@ console.log('群词典 · 解析')
 t('parseChatLog 解析出 5 条', () => {
   const rows = parseChatLog(LOG, SELF)
   assert.equal(rows.length, 5)
-  assert.equal(rows[0].name, '七音')
+  assert.equal(rows[0].name, '甲')
   assert.equal(rows[1].self, true)
   assert.equal(rows[1].text, '认不出')
 })
@@ -72,7 +72,7 @@ t('自己连着发多条，往上找非自己的那条', () => {
 })
 
 t('只是叫人（@ + 称呼）不算触发', () => {
-  const log = `- 22:42:06 · 七音(819050169)：@机器人 大肥鱼
+  const log = `- 22:42:06 · 甲(20001)：@机器人 大肥鱼
 - 22:42:10 · 水仙女人鱼(1737661812)：认不出
 `
   assert.deepEqual(findStuck(parseChatLog(log, SELF)), [])
@@ -132,13 +132,13 @@ t('新条目插在待确认节里，不动已确认表', () => {
 console.log('群词典 · 扫会话目录')
 t('scanOnce 找到群目录里的卡壳点', () => {
   const root = mkdtempSync(join(tmpdir(), 'qqroot-'))
-  const gdir = join(root, '群_580579694', '聊天记录')
+  const gdir = join(root, '群_123456789', '聊天记录')
   mkdirSync(gdir, { recursive: true })
   const today = new Date().toISOString().slice(0, 10)
   writeFileSync(join(gdir, `${today}.md`), LOG, 'utf8')
   const n = scanOnce({ workspaceRoot: root, selfId: SELF, today })
   assert.equal(n, 2)
-  const file = join(root, '群_580579694', '记忆区', '群词典.md')
+  const file = join(root, '群_123456789', '记忆区', '群词典.md')
   assert.ok(existsSync(file))
   assert.ok(readFileSync(file, 'utf8').includes('大肥鱼，这白毛是谁'))
 })

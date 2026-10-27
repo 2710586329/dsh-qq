@@ -10,8 +10,11 @@ import Schema from '@deepseek-ai/schemastery'
 export const ConfigSchema = Schema.object({
   // ── 连接 ──
   wsUrl: Schema.string()
-    .default('ws://127.0.0.1:3001')
-    .description('NapCat（或其它 OneBot 11 实现）的正向 WebSocket 地址，例如 ws://127.0.0.1:3001'),
+    .default('')
+    .description(
+      'NapCat（或其它 OneBot 11 实现）的正向 WebSocket 地址，例如 ws://127.0.0.1:3001。' +
+        '留空就不连接——不会偷偷去连 3001，启动时会在日志里提示去哪配',
+    ),
   accessToken: Schema.string()
     .default('')
     .description('与 NapCat 配置里一致的 access token，留空表示不鉴权（仅建议在本机回环场景）'),
@@ -198,6 +201,14 @@ export const ConfigSchema = Schema.object({
   imageMaxMB: Schema.number()
     .default(8)
     .description('单张图片最大体积（MB），超过就丢弃不下载'),
+
+  // ── 工具：查梗 ──
+  memeDb: Schema.string()
+    .default('')
+    .description(
+      '查梗用的词库（cnmeme.wiki 的 sqlite 快照）放在哪；留空则读环境变量 DSH_QQ_MEME_DB。' +
+        '两个都空时 qq_meme 会说明「没配词库」，不会瞎猜出处',
+    ),
 
   // ── 语音转文字（离线 vosk） ──
   asrEnabled: Schema.boolean()

@@ -260,14 +260,14 @@ test('截图 fixture：18:38 群聊（英文自评整行丢，群号那行要留
     'Honest: 现在能看到两个，一个群里没人说话、有记录是空的，另一个有几句。',
     'Hmm "有几个门" might mean "有几个群": Answer: 两个.',
     'Keep short: 两个',
-    '415158497 空着，580579694 只有几条',
+    '987654321 空着，123456789 只有几条',
     "That's factual and short. Two lines is fine.",
     'Slight report-feel but she asked a fact question.',
   ].join('\n\n')
   const clean = stripLeakedThinking(raw)
   assertNoSelfTalk(clean, '18:38')
   // 群号那一行是真的要发的话，不能误伤
-  assert.ok(clean.includes('415158497 空着，580579694 只有几条'), clean)
+  assert.ok(clean.includes('987654321 空着，123456789 只有几条'), clean)
   assert.ok(!clean.includes('factual'), clean)
   assert.ok(!clean.includes('report-feel'), clean)
 })
@@ -275,8 +275,8 @@ test('截图 fixture：18:38 群聊（英文自评整行丢，群号那行要留
 test('截图 fixture：18:38 第二段（`Too list-like … Compress to 2.` 混着中文草稿）', () => {
   const raw = [
     '两个',
-    '415158497 那条路是空的，一条记录都没有',
-    '580579694 有记录，不过也就早上那四句',
+    '987654321 那条路是空的，一条记录都没有',
+    '123456789 有记录，不过也就早上那四句',
     `Hmm, maybe don't lead with numbers as a list. It's fine.`,
     'Let me phrase: 能看到两个门...',
     "I'll write: 眼下是两个",
@@ -289,7 +289,7 @@ test('截图 fixture：18:38 第二段（`Too list-like … Compress to 2.` 混�
   ].join('\n\n')
   const clean = stripLeakedThinking(raw)
   assertNoSelfTalk(clean, '18:38-2')
-  assert.ok(clean.includes('415158497 那条路是空的'), clean)
+  assert.ok(clean.includes('987654321 那条路是空的'), clean)
   assert.ok(!clean.includes('Compress to 2'), clean)
   assert.ok(!clean.includes('list-like'), clean)
 })
@@ -332,8 +332,8 @@ test('`I(?:ll|m|ve|d)` 不带空格也要拦（19:30 修的老坑）', () => {
 
 test('数字开头的正文别当标签剥（群号那次的老坑）', () => {
   assert.equal(
-    stripLeakedThinking('415158497 空着，580579694 只有几条'),
-    '415158497 空着，580579694 只有几条',
+    stripLeakedThinking('987654321 空着，123456789 只有几条'),
+    '987654321 空着，123456789 只有几条',
   )
   // 真标签（带字母、带点）还是要剥
   assert.equal(stripLeakedThinking('Good.本姑娘这边显示是发出去了'), '本姑娘这边显示是发出去了')

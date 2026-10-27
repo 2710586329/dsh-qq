@@ -117,7 +117,7 @@ const groupReplies = new Map()
 const groupLastReplyAt = new Map()
 
 /** 被 groupReplyGapMs 压住的消息：到点自己醒一次。
- *  没有它，「攒着」就是永久沉默 —— 2026-10-25 群 580579694 实况：
+ *  没有它，「攒着」就是永久沉默 —— 2026-10-25 群 123456789 实况：
  *  @ 回过一句、下一句在 20 秒内被压进 backlog，姐姐不再开口，就再没动静。 */
 const gapReplayTimers = new Map()
 

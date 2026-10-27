@@ -179,7 +179,7 @@ dsh plugin --profile desktop remove dsh-onebot-hub
 浏览器半端没被加载。最常见两个原因：插件版本太老（1.1.1 之前的 `dsh.client.inject` 写了宿主要么没有的包），或者装的是改过包名却没跟着改 `client.js` 里 `id` 的版本。**现在不用等更新**：连上 NapCat 只看设置文件的话，改 `$DSH_HOME/dsh-qq/settings.json` 就够了（见上面第 3 步的兜底），QQ 本身不依赖设置页。插件启动日志里搜 `客户端半端自检`，它会把原因写在里面。
 
 **连不上 / 一直重连**
-看 NapCat 的 WebUI 里 WS 服务器是不是「启用」，端口对不对，Token 两边是否一模一样。插件日志里 `连接错误` 后面会带具体原因。
+先看 `wsUrl` 填没填——1.2.1 起留空就完全不连接，日志里会明说「wsUrl 还没填」，不会再对着 3001 空转。填了还连不上，看 NapCat 的 WebUI 里 WS 服务器是不是「启用」、端口对不对、Token 两边是否一模一样。日志里 `与 NapCat 断开` 那一行会带原因，之后的重试不再逐条刷屏，恢复时会补一句「断了多久、重试几次」。
 
 **配置看着没问题，但就是发不出去**
 NapCat 的 **WS 和 HTTP 是两个不同的 token**，填错不报错，只是安静地发不出去。另外别让 PowerShell 把配置写出 BOM——一个看不见的字节能让所有判断歪掉。
@@ -224,7 +224,9 @@ NapCat 的 **WS 和 HTTP 是两个不同的 token**，填错不报错，只是�
 
 ## 出问题了去哪问
 
-先在 [Issues](https://github.com/2710586329/dsh-qq/issues) 提一个：带上插件版本、DSH 版本、`dsh-qq-debug.log` 里相关的几行、复现步骤。**别贴 token 和真实 QQ 号。**
+先在 [Issues](https://github.com/2710586329/dsh-qq/issues) 提一个：带上插件版本、DSH 版本、日志里相关的几行、复现步骤。**别贴 token 和真实 QQ 号。**
+
+日志在哪：`<workspaceRoot>/logs/dsh-qq-<日期>.log`（一天一个文件，`workspaceRoot` 默认是跑插件的那个进程的 cwd，桌面端通常在 `$DSH_HOME/profiles/<profile>/logs/`）。找不到就在磁盘上搜 `dsh-qq-2026-*.log`——老版本的文档里写过的 `dsh-qq-debug.log` 已经不存在了。
 
 也可以直接把报错原文、`api-state.txt`、日志尾部丢给你的 AI 助手，通常能判断出是配置、连接还是插件本身的问题。
 

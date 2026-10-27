@@ -108,7 +108,7 @@ function safeJson(v) {
  * 用 `watchFile`（轮询）而不是 `fs.watch`，因为它**容忍文件不存在**（首次还没有
  * settings.json 时 watch 会直接报错），而且跨进程写盘在 Windows 上事件不可靠。
  */
-export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger) {
+export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger, clientRef = null) {
   let file = ''
   try {
     file = settingsFileOf(ctx, logger)
@@ -147,6 +147,18 @@ export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger)
           ? `settings.json 变了，已就地应用: ${applied.join(', ')}（不用重启）`
           : 'settings.json 变了，但没有可覆盖的键',
       )
+
+      // wsUrl 是唯一「填上之后必须立刻接上」的键：之前没配就没有 client 在连，
+      // 这里得把它拉起来。已经连着同一个地址时不动，免得把好好的连接打断。
+      const client = clientRef?.current
+      if (client) {
+        const want = String(config.wsUrl ?? '').trim()
+        if (want && !client.connected && client.url !== want) {
+          client.url = want
+          client.start()
+          logger.info(`wsUrl 改成了 ${want}，开始连接 NapCat`)
+        }
+      }
     } catch (err) {
       logger?.warn?.('重读 settings.json 失败:', err?.message ?? err)
     }
@@ -213,8 +225,10 @@ export function apply(ctx, config) {
   }
   const agents = ctx?.agents
 
-  // 另一个进程（设置面板）改了 settings.json 时，这边自己跟上，不用重启宿主
-  watchSettingsFile(ctx, config, overridesRef, personaRef, logger)
+  // 另一个进程（设置面板）改了 settings.json 时，这边自己跟上，不用重启宿主。
+  // clientRef 先占位：client 要到下面才建，热更新回调得能拿到它（填 wsUrl 后要自动接上）。
+  const clientRef = { current: null }
+  watchSettingsFile(ctx, config, overridesRef, personaRef, logger, clientRef)
 
   // 设置页接口：**运行时注入** webServer，而不是写进顶层 `export const inject`。
   // 有网页服务的宿主（Desktop / Web GUI）才会回调进来；headless 的 qqbot 永远不回调，
@@ -245,20 +259,24 @@ export function apply(ctx, config) {
     return
   }
 
-  // 没配地址就别说「在重连」——直接告诉人家改哪个文件
-  if (!String(config.wsUrl ?? '').trim()) {
+  // 没配地址就别去连——空 url 会让 `new WebSocket('')` 抛 Invalid URL，然后静默重连到天荒地老；
+  // 也不偷偷套一个 3001：那等于替用户做主，连不上还说不出为什么（issue #2 实测反馈）。
+  const wsUrl = String(config.wsUrl ?? '').trim()
+  if (!wsUrl) {
     logger.warn(
       `还没配 NapCat 的 WebSocket 地址（wsUrl），QQ 不会连上。` +
-        `去设置 → QQ 里填，或改 ${settingsFileOf(ctx, logger)}；保存后约 800ms 自动生效。`,
+        `去设置 → QQ 里填，或改 ${settingsFileOf(ctx, logger)}（常见值 ws://127.0.0.1:3001）；` +
+        `保存后约 800ms 自动接上，不用重启宿主。`,
     )
   }
 
   const client = new OneBotClient({
-    url: config.wsUrl,
+    url: wsUrl,
     token: config.accessToken,
     reconnectMs: config.reconnectMs,
     logger,
   })
+  clientRef.current = client
 
   let selfId = String(config.selfId ?? '')
   const manager = new SessionManager({ agents, selfId, config, logger, home: homeDirOf(ctx, logger) })
@@ -438,13 +456,56 @@ const pin = createPin({ config, logger })
     }
   })
 
+  // 断开日志用状态机：第一次断打一行带原因，之后只累计；持续断开时每小时最多一句汇总。
+  // 逐条打的话，退避重连（5s→10s→20s→40s→60s）一小时能刷出约 120 行 warn，
+  // 把真正重要的行全埋了（issue #2 实测反馈）。
+  let downSince = 0
+  let dropCount = 0
+  let lastSummaryAt = 0
+  const noteDown = (reason) => {
+    const now = Date.now()
+    dropCount += 1
+    if (!downSince) downSince = now
+    if (dropCount === 1) {
+      lastSummaryAt = now
+      logger.warn(
+        `与 NapCat 断开${reason ? `（${reason}）` : ''}，稍后自动重连；后续重试不再逐条报，恢复时会通知`,
+      )
+      return
+    }
+    if (now - lastSummaryAt >= 3600_000) {
+      lastSummaryAt = now
+      const mins = Math.max(1, Math.round((now - downSince) / 60000))
+      logger.warn(
+        `与 NapCat 断开已持续约 ${mins} 分钟，累计重试 ${dropCount} 次，最近一次：${reason || '无详情'}`,
+      )
+    }
+  }
+
+  client.on('open', () => {
+    if (downSince > 0) {
+      const mins = Math.max(1, Math.round((Date.now() - downSince) / 60000))
+      logger.info(`NapCat 连回来了（断了约 ${mins} 分钟，累计重试 ${dropCount} 次）`)
+    }
+    downSince = 0
+    dropCount = 0
+    lastSummaryAt = 0
+  })
   client.on('close', () => {
     bridge.markDown()
-    logger.warn('与 NapCat 断开，稍后自动重连')
+    noteDown('')
   })
-  client.on('error', (err) => logger.warn('连接错误:', err?.message ?? err))
+  client.on('error', (err) => {
+    noteDown(String(err?.message ?? err ?? ''))
+  })
 
-  client.start()
+  // 地址没配就别 start：OneBotClient 会对空 url 无限重试，日志刷屏还没结果。
+  // 填上地址后由 watchSettingsFile 那个 clientRef 回调把它拉起来。
+  if (wsUrl) {
+    client.start()
+  } else {
+    logger.info('wsUrl 还没填，先不连接 NapCat（填好并保存后会自动接上）')
+  }
   wake.start()
   bedtime.start()
 

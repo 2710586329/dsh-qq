@@ -32,13 +32,13 @@ await new Promise((r) => setTimeout(r, 1200))
 assert.equal(config.groupMode, 'disabled', '① 没有 settings.json 时不该动 config')
 
 // ② 另一个进程写盘 → 这边应该自己跟上
-writeFileSync(file, JSON.stringify({ groupMode: 'allowlist', groupAllow: ['580579694'] }), 'utf8')
+writeFileSync(file, JSON.stringify({ groupMode: 'allowlist', groupAllow: ['123456789'] }), 'utf8')
 await new Promise((r) => setTimeout(r, 2200))
 
 assert.equal(config.groupMode, 'allowlist', '② groupMode 应被热更新成 allowlist')
-assert.deepEqual(config.groupAllow, ['580579694'], '② groupAllow 应被热更新')
+assert.deepEqual(config.groupAllow, ['123456789'], '② groupAllow 应被热更新')
 assert.equal(config.requireMention, true, '② 没被覆盖的键不该动')
-assert.deepEqual(overridesRef.current, { groupMode: 'allowlist', groupAllow: ['580579694'] }, '② 覆盖表要同步')
+assert.deepEqual(overridesRef.current, { groupMode: 'allowlist', groupAllow: ['123456789'] }, '② 覆盖表要同步')
 
 // ③ 再改一次：值被换成新的，覆盖表跟着变（不是追加）
 writeFileSync(file, JSON.stringify({ groupMode: 'open' }), 'utf8')

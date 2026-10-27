@@ -42,8 +42,8 @@ function writeDiary(root, gid, body, day = DAY) {
 
 const REAL_GROUP = `# 2026-10-27
 
-> 一句话：刚过零点，希儿高血糖害我得蛀牙在群里连说「不要电不要电」「哪个是萝莉」「没有萝莉为什么要电」，那会儿群里只有他一个人在说话。
-> 关键结论：没什么结论，就是三句玩笑话；前一夜 23:35 七音刚问过「高压电呢？」，两段是不是同一个话头，记录里看不出来。
+> 一句话：刚过零点，某人在群里连说「不要电不要电」「哪个是萝莉」「随便说的一句」，那会儿群里只有他一个人在说话。
+> 关键结论：没什么结论，就是三句玩笑话；前一夜 23:35 甲刚问过「高压电呢？」，两段是不是同一个话头，记录里看不出来。
 > 下次要看：这个群今天白天一条记录都没有；「高压电」「萝莉」这些说法本姑娘没接，也没弄明白。
 
 ## 00:08 · 「不要电不要电」
@@ -51,11 +51,11 @@ const REAL_GROUP = `# 2026-10-27
 「电」是玩笑还是别的什么，**本姑娘没弄明白**，也没敢乱解。这三句之后没有人接，本姑娘也没出声。
 `
 
-const REAL_CHAT = `# 群 580579694 · 2026-10-27
+const REAL_CHAT = `# 群 123456789 · 2026-10-27
 
-- 00:08:40 · 希儿高血糖害我得蛀牙(3027160989)：不要电不要电
-- 00:08:46 · 希儿高血糖害我得蛀牙(3027160989)：哪个是萝莉
-- 00:08:57 · 希儿高血糖害我得蛀牙(3027160989)：没有萝莉为什么要电
+- 00:08:40 · 某人(10002)：不要电不要电
+- 00:08:46 · 某人(10002)：哪个是萝莉
+- 00:08:57 · 某人(10002)：随便说的一句
 `
 
 test('pickDigestLine：抓得到 `> 一句话：`，抓不到就空串', () => {
@@ -67,11 +67,11 @@ test('pickDigestLine：抓得到 `> 一句话：`，抓不到就空串', () => {
 
 test('尾巴：最后谁说了话，加一句前一句', () => {
   const root = mkRoot()
-  writeChat(root, '580579694', REAL_CHAT)
+  writeChat(root, '123456789', REAL_CHAT)
   const out = loadGroupDigest({ workspaceRoot: root, today: DAY, selfId: ME })
   const lines = out.split('\n')
   assert.equal(lines.length, 2, `实际：${out}`)
-  assert.equal(lines[0], '· 群 580579694：最后 00:08:57 希儿高血糖害我得蛀牙 说「没有萝莉为什么要电」')
+  assert.equal(lines[0], '· 群 123456789：最后 00:08:57 某人 说「随便说的一句」')
   assert.ok(lines[1].includes('00:08:46'), '前一句该带上时间')
   assert.ok(!out.includes('本姑娘'), '日记正文一个字都不许带出去')
 })
@@ -80,7 +80,7 @@ test('尾巴：有人点了她的名、她没应 —— 单独一行标出来', 
   const root = mkRoot()
   writeChat(
     root,
-    '415158497',
+    '987654321',
     [
       '- 10:00:00 · 甲(111111)：在吗',
       `- 10:02:00 · 乙(222222)：@${ME} 这个你怎么看`,
@@ -95,7 +95,7 @@ test('尾巴：有人点了她的名、她没应 —— 单独一行标出来', 
 
 test('尾巴：最后一句就是点她名 —— 合成一行，不重复', () => {
   const root = mkRoot()
-  writeChat(root, '580579694', `- 10:10:00 · 丙(333333)：@${ME} 帮忙看看这个\n`)
+  writeChat(root, '123456789', `- 10:10:00 · 丙(333333)：@${ME} 帮忙看看这个\n`)
   const out = loadGroupDigest({ workspaceRoot: root, today: DAY, selfId: ME })
   assert.equal(out.split('\n').length, 1, out)
   assert.ok(out.includes('丙 点了你名「帮忙看看这个」——你没应'), out)
@@ -103,7 +103,7 @@ test('尾巴：最后一句就是点她名 —— 合成一行，不重复', () 
 
 test('尾巴：她自己说的话不算「群里有人说话」', () => {
   const root = mkRoot()
-  writeChat(root, '580579694', `- 10:00:00 · 鲸鲸(深海鲸鱼娘)(${ME})：我在呢\n`)
+  writeChat(root, '123456789', `- 10:00:00 · 鲸鲸(深海鲸鱼娘)(${ME})：我在呢\n`)
   assert.equal(loadGroupDigest({ workspaceRoot: root, today: DAY, selfId: ME }), '')
 })
 
@@ -128,7 +128,7 @@ test('多群按群号排；没记录 / 目录不存在 → 空串', () => {
 })
 
 test('buildChatPrompt：纸条只进私聊，群聊不塞', () => {
-  const digest = '· 群 580579694：最后 00:08:57 某人 说「没有萝莉为什么要电」'
+  const digest = '· 群 123456789：最后 00:08:57 某人 说「随便说的一句」'
   const priv = buildChatPrompt({}, { isGroup: false, groupDigest: digest })
   assert.ok(priv.includes('【今天群里发生过'), '私聊该有纸条')
   assert.ok(priv.includes('这不是你翻出来的'), '得点明这是插件递的，不是她翻的本子')

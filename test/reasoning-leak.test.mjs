@@ -58,7 +58,15 @@ test('不带工具的消息：还救得回来（别把上一轮的修复弄丢�
 
 test('接线检查：outbound.js 的兜底那行必须带 hasToolUse 护栏', () => {
   const src = readFileSync(new URL('../src/outbound.js', import.meta.url), 'utf8')
-  assert.match(src, /if \(!text && !hasToolUse\(data\.message\)\) text = reasoningTail\(data\.message\)/)
+  // 10-27 16:00 之后兜底不再是单行：块里还要分「带 SILENT_MARKER → 按沉默」和
+  // 「否则过 stripMetaTalk」。这里钉的是入块条件本身，别再回到无护栏的写法。
+  assert.match(src, /if \(!text && !hasToolUse\(data\.message\)\) \{/)
+  const idx = src.indexOf('if (!text && !hasToolUse(data.message)) {')
+  assert.ok(idx > 0, '护栏那行不见了')
+  const block = src.slice(idx, idx + 1200)
+  assert.match(block, /reasoningTail\(data\.message\)/, '块里要真的去取 reasoning 尾段')
+  assert.match(block, /SILENT_MARKER/, '带静默标记的内容要按沉默处理，不能当正文发')
+  assert.match(block, /stripMetaTalk\(/, '捞出来的内容要先剥掉改稿指令')
 })
 
 test('接线检查：带工具调用的 assistant/message 整条不发（09:53 结构性根治）', () => {

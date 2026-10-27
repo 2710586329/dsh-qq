@@ -86,7 +86,7 @@ const config = Config({
   groupMinGapMs: 0, // 间隔由真实部署管，测试里关掉免得每个断言都要等 4 秒
   groupReplyGapMs: 0, // 同上：均匀间隔单独用一个用例验，别拖慢其他断言
   persona: '你叫小满，是个住在电脑里的助手。',
-  ownerIds: ['69099923'],
+  ownerIds: ['11001'],
   peerBots: ['10002'], // 测试里把「另一个机器人」登记成同类，才测得了「开关关着不接」
   contextSwapMinTokens: 1000,
 })
@@ -96,7 +96,7 @@ await waitFor(() => mock.clientCount === 1, { what: '插件连上假 NapCat' })
 console.log('✓ 连接与鉴权通过')
 
 // —— 私聊 ——
-mock.emitPrivateText({ userId: 69099923, nickname: '朋友', text: '在吗在吗', messageId: 101 })
+mock.emitPrivateText({ userId: 11001, nickname: '朋友', text: '在吗在吗', messageId: 101 })
 await waitFor(() => created.length === 1 && created[0].received.length === 1, { what: '私聊入站' })
 const privateAgent = created[0]
 assert.match(textOf(privateAgent.received[0]), /在吗在吗/, '私聊正文应该原样进 agent')
@@ -116,7 +116,7 @@ ctx.emit('session/event', privateAgent.session, {
 })
 await waitFor(() => mock.calls.some((c) => c.action === 'send_private_msg'), { what: '私聊出站' })
 const sentPrivate = mock.calls.find((c) => c.action === 'send_private_msg')
-assert.equal(Number(sentPrivate.params.user_id), 69099923)
+assert.equal(Number(sentPrivate.params.user_id), 11001)
 assert.match(JSON.stringify(sentPrivate.params.message), /在的在的/)
 console.log('✓ assistant/message → send_private_msg')
 
@@ -135,7 +135,7 @@ assert.equal(
 console.log('✓ 重复消息去重')
 
 // 聊天规矩 / persona 只在会话首条注入一次，第二条不该重复
-mock.emitPrivateText({ userId: 69099923, nickname: '朋友', text: '再问一句', messageId: 111 })
+mock.emitPrivateText({ userId: 11001, nickname: '朋友', text: '再问一句', messageId: 111 })
 await waitFor(() => privateAgent.received.length === 2, { what: '第二条私聊' })
 assert.match(textOf(privateAgent.received[1]), /再问一句/)
 assert.doesNotMatch(textOf(privateAgent.received[1]), /你正在用 QQ 跟人聊天/, '聊天规矩不应每条重复注入')
@@ -216,14 +216,14 @@ mock.emitEvent({
   message_type: 'group',
   self_id: 10001,
   group_id: 88888,
-  user_id: 69099923,
+  user_id: 11001,
   message_id: 203,
   raw_message: '[CQ:at,qq=10001] 我回来了',
   message: [
     { type: 'at', data: { qq: '10001' } },
     { type: 'text', data: { text: ' 我回来了' } },
   ],
-  sender: { user_id: 69099923, nickname: '主人' },
+  sender: { user_id: 11001, nickname: '主人' },
 })
 await waitFor(() => groupAgent.received.length === 2, { what: '主人群聊入站' })
 assert.match(textOf(groupAgent.received[1]), /· 主人/, '主人发言应该在群历史里被标出来')
@@ -430,7 +430,7 @@ console.log('✓ 同类机器人在历史里标「· 同类机器人」')
 // —— 没有 @ 就不接，主人也一样（2026-10-24 取消「主人永久免 @」）——
 // 用一个没人 @ 过的新群，免得蹭到前面用例开出来的窗口
 const totalBefore = created.reduce((n, a) => n + a.received.length, 0)
-mock.emitGroupText({ groupId: 88891, userId: 69099923, nickname: '主人', text: '我随便说一句', messageId: 308 })
+mock.emitGroupText({ groupId: 88891, userId: 11001, nickname: '主人', text: '我随便说一句', messageId: 308 })
 await sleep(500)
 const totalAfter = created.reduce((n, a) => n + a.received.length, 0)
 assert.equal(totalAfter, totalBefore, '没 @ 也没在保活期，主人说话也不该投递')
@@ -445,7 +445,7 @@ const countAll = () => created.reduce((n, a) => n + a.received.length, 0)
 const beforeName = countAll()
 mock.emitGroupText({
   groupId: 88895,
-  userId: 69099923,
+  userId: 11001,
   nickname: '路人乙',
   text: '大肥鱼，这白毛是谁',
   messageId: 309,
@@ -571,7 +571,7 @@ const config2 = Config({
   wsUrl: `ws://127.0.0.1:${PORT}`,
   accessToken: TOKEN,
   privateMode: 'allowlist',
-  privateAllow: ['69099923'],
+  privateAllow: ['11001'],
   splitDelayMs: 0,
 })
 apply(ctx2, config2)
@@ -579,7 +579,7 @@ await waitFor(() => mock.clientCount === 2, { what: '第二个实例连上' })
 mock.emitPrivateText({ userId: 42, nickname: '陌生人', text: '你好', messageId: 301 })
 await sleep(300)
 assert.equal(created2.length, 0, '白名单外的私聊应该被拦下')
-mock.emitPrivateText({ userId: 69099923, nickname: '朋友', text: '是我', messageId: 302 })
+mock.emitPrivateText({ userId: 11001, nickname: '朋友', text: '是我', messageId: 302 })
 await waitFor(() => created2.length === 1, { what: '白名单内私聊放行' })
 console.log('✓ 私聊白名单：陌生人拦下、自己人放行')
 
@@ -587,7 +587,7 @@ console.log('✓ 私聊白名单：陌生人拦下、自己人放行')
 ctx.emit('session/event', privateAgent.session, { type: 'compaction/end', data: {} })
 await sleep(100)
 assert.equal(privateAgent.injected.length, 1, '压缩后应该 inject 一张记忆卡')
-mock.emitPrivateText({ userId: 69099923, nickname: '朋友', text: '刚才说到哪了', messageId: 401 })
+mock.emitPrivateText({ userId: 11001, nickname: '朋友', text: '刚才说到哪了', messageId: 401 })
 // 白名单那段也走同一个 mock，私聊会话此时已经收到第 3 条（「是我」）
 await waitFor(() => privateAgent.received.length === 4, { what: '压缩后的私聊' })
 assert.match(textOf(privateAgent.received[3]), /你正在用 QQ 跟人聊天/, '压缩后应该重新注入聊天规矩')
@@ -607,7 +607,7 @@ ctx.emit('session/event', privateAgent.session, {
     usage: { inputTokens: 5000, outputTokens: 10, cacheReadTokens: 4000, cacheWriteTokens: 0, totalTokens: 9010 },
   },
 })
-mock.emitPrivateText({ userId: 69099923, nickname: '朋友', text: '聊点别的', messageId: 411 })
+mock.emitPrivateText({ userId: 11001, nickname: '朋友', text: '聊点别的', messageId: 411 })
 // 前面白名单那段的「陌生人」消息也会进这个 open 实例，created 里可能多出别的会话，
 // 所以按内容找，不按序号找
 const gotIt = (agent) => agent.received.some((m) => textOf(m).includes('聊点别的'))

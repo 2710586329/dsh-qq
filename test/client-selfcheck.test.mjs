@@ -76,6 +76,25 @@ check('带换行和空格的写法也能解析', parseClientId(`window.__ModuleL
   check('坏 JSON → 不抛、有报错', r.problems.map((p) => p.code), ['bad-package-json'])
 }
 
+// ⑧ inject 里出现废弃包名（老文档抄来的裸名）——宿主同样会静默跳过
+{
+  const pkg = JSON.stringify({ name: 'x', version: '1.0.0', dsh: { client: { inject: ['dsh-client-runtime'] } } })
+  const r = inspectBundle({ pkgText: pkg, clientText: "window.__ModuleLoader__.load({ id: 'x' })" })
+  check('废弃包名 → 报 deprecated-inject', r.problems.map((p) => p.code), ['deprecated-inject'])
+  check('提示里给出正确写法', r.problems[0].message.includes('@deepseek-ai/dsh-client-runtime'), true)
+}
+
+// ⑨ 正确写法（带 scope）不许误报
+{
+  const pkg = JSON.stringify({
+    name: 'x',
+    version: '1.0.0',
+    dsh: { client: { inject: ['@deepseek-ai/dsh-api-remotes', '@deepseek-ai/dsh-client-runtime'] } },
+  })
+  const r = inspectBundle({ pkgText: pkg, clientText: "window.__ModuleLoader__.load({ id: 'x' })" })
+  check('正常 inject 不误报', r.ok, true)
+}
+
 // ⑦ 骨架 settings 里的 `//` 说明键不能被当成覆盖项
 {
   const skeleton = { '//': '说明文字', wsUrl: 'ws://127.0.0.1:3001' }

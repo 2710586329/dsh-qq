@@ -8,7 +8,7 @@
 
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
-| `wsUrl` | `ws://127.0.0.1:3001` | NapCat 的 WebSocket 服务端地址 |
+| `wsUrl` | 空 | NapCat 的 WebSocket 服务端地址，如 `ws://127.0.0.1:3001`。**留空就不连接**（不会偷偷去连 3001）；填好保存约 0.8 秒自动接上，不用重启 |
 | `accessToken` | 空 | NapCat 那边设的 Token，留空就不带鉴权头 |
 | `selfId` | 空 | 机器人 QQ 号。留空会自动 `get_login_info` 查 |
 | `reconnectMs` | `5000` | 断线重连间隔（毫秒） |
@@ -60,6 +60,7 @@
 | --- | --- | --- |
 | `imageCacheDir` | 空 | 收到的图片下载到哪；留空用 `<cwd>/图片缓存` |
 | `imageMaxMB` | `8` | 单张图片体积上限 |
+| `memeDb` | 空 | 查梗词库（`memes.db`）的路径；留空读环境变量 `DSH_QQ_MEME_DB`，两个都空则 `qq_meme` 回「没配词库」 |
 | `faceCollectHint` | 空 | 什么样的图值得收进表情包收藏；留空 = 一张都不收 |
 | `faceSendGapMs` | `90000` | 两次发图/表情之间至少隔多少毫秒；`0` = 不限 |
 | `faceSendMaxPerHour` | `6` | 一小时最多发几张图/表情（`qq_mface` + `qq_send_image` 合计）；`0` = 不限 |

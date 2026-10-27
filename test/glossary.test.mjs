@@ -24,7 +24,7 @@ const SAMPLE = `# 群词典 · 群聊黑话与角色
 
 ## 待确认
 
-- [ ] 希儿高血糖害我得蛀牙：不要电不要电，哪个是萝莉
+- [ ] 某人：不要电不要电，哪个是萝莉
   ↳ 00:08:41 鲸鲸回「啥意思」
 
 ## 已确认
@@ -36,7 +36,7 @@ const SAMPLE = `# 群词典 · 群聊黑话与角色
 function mkRecord() {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-qq-gloss-'))
   mkdirSync(join(dir, '记忆区'), { recursive: true })
-  return { dir, label: '群 580579694' }
+  return { dir, label: '群 123456789' }
 }
 
 test('clipGlossary：头部那几行 `>` 说明不念给它听', () => {
@@ -60,8 +60,8 @@ test('clipGlossary：空内容 / 只有说明 → 空串', () => {
 })
 
 test('glossaryFileFor：落在会话目录的 记忆区/群词典.md', () => {
-  const rec = { dir: 'D:/x/QQ会话/群_580579694' }
-  assert.equal(glossaryFileFor(rec), join('D:/x/QQ会话/群_580579694', '记忆区', '群词典.md'))
+  const rec = { dir: 'D:/x/QQ会话/群_123456789' }
+  assert.equal(glossaryFileFor(rec), join('D:/x/QQ会话/群_123456789', '记忆区', '群词典.md'))
   assert.equal(glossaryFileFor({}), '')
 })
 

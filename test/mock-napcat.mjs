@@ -7,7 +7,7 @@
  * 单独跑：
  *   node test/mock-napcat.mjs --port 3001 --token abc
  * 然后在标准输入敲一行 JSON 就当作 QQ 事件广播给所有客户端，例如：
- *   {"post_type":"message","message_type":"private","user_id":69099923,"message":[{"type":"text","data":{"text":"在吗"}}],"sender":{"nickname":"朋友"}}
+ *   {"post_type":"message","message_type":"private","user_id":11001,"message":[{"type":"text","data":{"text":"在吗"}}],"sender":{"nickname":"朋友"}}
  */
 import { createServer } from 'node:http'
 import { WebSocketServer } from 'ws'
