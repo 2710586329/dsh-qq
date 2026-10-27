@@ -2,6 +2,18 @@
 
 本文件记录 dsh-qq 的版本变更。格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号照 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.2.2] - 2026-10-27
+
+### 安全
+
+- **私聊默认不再放行陌生人**：`privateMode` 默认从 `open` 改成 `allowlist`。原来的默认等于「任何人只要加了这个 QQ 号、发一句私聊，就能指挥跑在你这台机器上的 agent」——读文件、跑命令都算（[PR #9370 的评论](https://github.com/2710586329/awesome-dsh-plugin/pull/9370)点了这一条，复核属实）。现在默认只认 `privateAllow` 里的人，**白名单空着就谁都不理**；启动时检测到「白名单空着」会打一句 warn 说清怎么填。显式写过 `privateMode` 的配置不受影响。
+- `test/private-gate.test.mjs` 钉住默认值，以及「空白名单 = 全拒」而不是「空名单 = 不限」。
+
+### 修复
+
+- **1.2.1 的 wsUrl 修复没到用户手上**（issue #2 第三次实测）：只改了 `src/config.js` 的 schema 默认值，**漏了插件包自带的 `cordis.patch.yml`**——那里第 18 行还写着 `wsUrl: 'ws://127.0.0.1:3001'`，而 patch 是在 schema 之后应用的，「没配就不去连」那段永远走不到，用户装完 1.2.1 重启照样看到 `ECONNREFUSED 127.0.0.1:3001`。现在 patch 里 `wsUrl: ''`、`privateMode: allowlist`，并在文件头写明「这里会盖住 schema，改默认值要两边一起改」。
+- **`test/patch-defaults.test.mjs`：新增一致性护栏**——把 `cordis.patch.yml` 里的每个键和 `new ConfigSchema({})` 的默认值逐个比对，两处漂移就红。上面这个坑就是这么漏过去的：代码对了，默认值在 patch 层又被人为填回去。
+
 ## [1.2.1] - 2026-10-27
 
 ### 新增

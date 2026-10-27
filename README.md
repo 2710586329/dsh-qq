@@ -124,7 +124,7 @@ dsh plugin --profile desktop why dsh-qq-onebot
 | `persona` | 空 | 想让它有名字、有性格、有称呼 |
 | `ownerIds` / `ownerLabel` | `[]` / `主人` | 想在群里认出主人，优先响应 |
 | `requireMention` | `true` | 群里不 @ 也想让它接话 |
-| `groupMode` / `privateMode` | `open` | 只想在指定群 / 指定人那里开 |
+| `groupMode` / `privateMode` | `open` / `allowlist` | 只想在指定群 / 指定人那里开；私聊默认只认白名单 |
 | `groupReplyGapMs` | `20000` | 觉得回得太密（防刷屏、防风控） |
 | `rateLimitPerMin` | `12` | 每个会话每分钟最多发几条 |
 | `contextGuard` | `true` | 不想要自动换会话就关掉 |
@@ -159,6 +159,22 @@ dsh plugin --profile desktop why dsh-qq-onebot
 | 其它 | `debug`、`textChunkLimit`、`splitDelayMs` |
 
 改完立刻生效（`wsUrl` / `accessToken` 要点「重连」；`reconnectMs` / `selfId` / `workspaceRoot` / `isolateByPeer` / `asrPython` 要重启宿主）。设置写在 `$DSH_HOME/dsh-qq/settings.json`，只覆盖你显式设过的键，清空就回默认——**不动 profile 的 `cordis.patch.yml`**。
+
+### 谁能跟它说话（⚠️ 默认只认白名单）
+
+私聊默认 `privateMode: allowlist`，而 `privateAllow` 默认是空的——**装好之后，谁私聊它都不理**。这是故意的：能私聊这个号的人，就能指挥跑在你机器上的 agent（读文件、跑命令都算）。
+
+要放人进来：
+
+```yaml
+privateMode: 'allowlist'
+privateAllow:
+  - '你的QQ号'
+```
+
+想谁都聊就写 `privateMode: 'open'`（风险自担），彻底关掉私聊写 `disabled`。
+
+> 从 1.2.1 及更早升级上来：以前默认是 `open`。配置里显式写过 `privateMode` 的不受影响；没写过的，升级后私聊会静默不回应——启动日志里那句「私聊白名单（privateAllow）是空的」就是在说这件事。
 
 同一个 QQ 号不能两处同时登录（会互相抢消息），所以桌面 / Web GUI 那份配 `uiOnly: true`：只提供设置页，不连 NapCat；真正干活的是 `--profile qqbot` 那个宿主。
 

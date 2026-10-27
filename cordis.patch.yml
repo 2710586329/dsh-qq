@@ -7,6 +7,11 @@
 #
 # 叠加顺序：dsh-base → 本 bundle patch → profile cordis.patch.yml → --patch
 # 注意：后层 patch 是「整行替换 config」，不是深合并。要覆盖这里某个键，请把整块 config 重写一遍。
+#
+# ⚠️ 这里写的值会盖住 src/config.js 的 schema 默认值（本 patch 后应用，以本 patch 为准）。
+#    改默认值 = 这两个文件一起改；只改一边的话，用户看到的行为跟代码里的默认值对不上
+#    （1.2.1 就栽过：schema 的 wsUrl 改成空，这里还留着 3001，于是「没配就不连」永远走不到）。
+#    test/patch-defaults.test.mjs 会盯着两边是否一致。
 
 - insert:
     - id: dsh-qq
@@ -15,7 +20,9 @@
       name: 'dsh-qq-onebot'
       config:
         # ── 连接 ──
-        wsUrl: 'ws://127.0.0.1:3001'
+        # 留空 = 不连接。填 NapCat 的地址（常见 ws://127.0.0.1:3001）才连；
+        # 不要在这里替用户填个地址，否则连不上时用户会以为是自己配错了。
+        wsUrl: ''
         accessToken: ''
         selfId: ''
         reconnectMs: 5000
@@ -31,7 +38,9 @@
         replyToPrivate: true
         groupMode: open
         groupAllow: []
-        privateMode: open
+        # 私聊默认只认白名单：能私聊这个号的人，就能指挥跑在用户机器上的 agent。
+        # 白名单空着 = 谁都不理；要放人进来把 QQ 号填进 privateAllow。
+        privateMode: allowlist
         privateAllow: []
 
         # ── 输出 ──

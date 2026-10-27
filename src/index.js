@@ -506,6 +506,14 @@ const pin = createPin({ config, logger })
   } else {
     logger.info('wsUrl 还没填，先不连接 NapCat（填好并保存后会自动接上）')
   }
+  // 私聊门控：默认 allowlist，白名单空着 = 谁都不理。不说清楚，用户会以为「加了好友怎么没反应」。
+  const privateAllow = (config.privateAllow ?? []).map(String).filter(Boolean)
+  if (config.replyToPrivate && config.privateMode === 'allowlist' && privateAllow.length === 0) {
+    logger.warn(
+      '私聊白名单（privateAllow）是空的：现在任何人私聊都不会被回应。' +
+        '要把谁放进来，去设置 → QQ 里填他的 QQ 号；想谁都聊就把 privateMode 改成 open。',
+    )
+  }
   wake.start()
   bedtime.start()
 

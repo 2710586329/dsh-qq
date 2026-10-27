@@ -41,8 +41,8 @@
 | --- | --- | --- |
 | `groupMode` | `open` | `open` / `allowlist` / `disabled` |
 | `groupAllow` | `[]` | `allowlist` 模式下允许的群号 |
-| `privateMode` | `open` | `open` / `allowlist` / `disabled` |
-| `privateAllow` | `[]` | `allowlist` 模式下允许的 QQ 号 |
+| `privateMode` | `allowlist` | `open` / `allowlist` / `disabled`；默认只认白名单，白名单空着 = 谁都不理 |
+| `privateAllow` | `[]` | `allowlist` 模式下允许的 QQ 号；**空着就没人能私聊进来** |
 | `replyToPrivate` | `true` | 私聊总开关 |
 | `ownerIds` | `[]` | 主人的 QQ 号（可多个）；群聊里这些人会被标出来，其他群友当陌生人 |
 | `ownerLabel` | `主人` | 群聊里怎么称呼这位主人，例如「老板」 |

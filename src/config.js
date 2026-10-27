@@ -157,11 +157,14 @@ export const ConfigSchema = Schema.object({
     .default([])
     .description('已知的同类机器人 QQ 号；填了才认得出「这句是别的机器人发的」（NapCat 也带 is_robot 时同样认）'),
   privateMode: Schema.union(['open', 'allowlist', 'disabled'])
-    .default('open')
-    .description('私聊访问控制：open 全部 / allowlist 仅白名单 / disabled 关闭私聊'),
+    .default('allowlist')
+    .description(
+      '私聊访问控制：allowlist 仅白名单（默认；白名单空着 = 谁都不理）/ open 谁都能聊 / disabled 关闭私聊。' +
+        '默认不再放行陌生人：能私聊这个号的人，就能指挥跑在你机器上的 agent',
+    ),
   privateAllow: Schema.array(Schema.string())
     .default([])
-    .description('privateMode=allowlist 时生效的 QQ 号列表'),
+    .description('privateMode=allowlist 时生效的 QQ 号列表；空着就谁都不理'),
 
   // ── 主动说话的「冷会话拉回」（2026-10-25 加）──
   // 会话闲置太久会被回收出内存；主动说话轮只看得见内存里的会话，
