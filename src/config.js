@@ -299,6 +299,40 @@ export const ConfigSchema = Schema.object({
       '休息时段（sleepFrom~sleepTo）和说完晚安后，私聊消息先捂着、早上再一起回；关着 = 照常回（姐姐半夜说话说明她醒了）',
     ),
 
+  // ── 夜里的读书问询（2026-10-27 加）──
+  // 老三的原话：半夜别主动开口（嚎一嗓子没人应，还怕把姐姐吵着），
+  // 但想要「那种不开口的轮次，只让自己翻两页书」。
+  // 做法不是命令它去读，是**问一句**「要不要看会儿书」——它可以拒绝，拒绝什么也不用做。
+  // 这一轮里它说的话、调的发送工具一律发不出去（见 index.js 的 record.quietRound）。
+  // 默认关：发布版的人完全看不见这一层，只有本地 profile 自己打开。
+  readingEnabled: Schema.boolean()
+    .default(false)
+    .description('夜里给一次「要不要看会儿书」的问询（这一轮不会往外发任何消息）。默认关，只给本地用'),
+  readingHours: Schema.string()
+    .default('01:00-05:00')
+    .description('问询落在哪段时间里，格式 HH:MM-HH:MM（默认凌晨一点到五点）'),
+  readingAskCount: Schema.number()
+    .default(2)
+    .description('一夜最多问几次（它拒绝也算问过一次；0 = 不问）'),
+  readingAskGapMs: Schema.number()
+    .default(10800000)
+    .description('两次问询至少隔多久，单位毫秒（默认 3 小时）'),
+  readingBook: Schema.string()
+    .default('')
+    .description('书名，用来在书签里找「下次从哪接」（留空 = 这层不启用）'),
+  readingChapterDir: Schema.string()
+    .default('')
+    .description('章节目录，用来判断「是不是读完了」（读完就不再问）'),
+  readingBookmark: Schema.string()
+    .default('')
+    .description('书签文件（五列 markdown 表：书 / 读到哪 / 哪天 / 下次从哪接 / 一句话心得）'),
+  readingPeer: Schema.string()
+    .default('')
+    .description('问询投给哪个 QQ 号（留空 = 私聊白名单第一个）'),
+  readingTimeoutMs: Schema.number()
+    .default(1200000)
+    .description('一轮问询最多等多久，单位毫秒（默认 20 分钟——它真读两章再写书签，比闲聊慢得多）'),
+
   // ── 连发合并 ──
   mergeWindowMs: Schema.number()
     .default(5000)

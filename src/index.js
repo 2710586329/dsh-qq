@@ -12,6 +12,7 @@ import { createBridge } from './bridge.js'
 import { createPin } from './pin.js'
 import { createWake } from './wake.js'
 import { createSleep } from './sleep.js'
+import { createReading } from './reading.js'
 import { startLearning } from './learning.js'
 import { createContextGuard } from './context-guard.js'
 import { auditOutbound } from './audit.js'
@@ -330,6 +331,12 @@ const pin = createPin({ config, logger })
   }
 
   async function send(record, text) {
+    // 夜里的读书问询：这一轮是给她自己待着的，不是给对话用的。
+    // 提示词里已经写了「发不出去」，但光靠说会漏，这里硬拦一道。
+    if (record?.quietRound) {
+      logger.info(`[dsh-qq] ${record.label} 读书问询轮，这段不往外发`)
+      return
+    }
     // 「这次不接话」：模型只输出 [SILENT] 就当作它选择潜水 —— 不发、不进历史、不报错。
     // 出口只在「这条不一定是在叫它」时给（见 inbound.js 的 mustReply），
     // 被 @、被引用、私聊都不会走到这里。
@@ -415,6 +422,8 @@ const pin = createPin({ config, logger })
   const contextGuard = createContextGuard({ manager, config, logger })
   const wake = createWake({ config, manager, logger, bridge, pin })
   const bedtime = createSleep({ config, manager, logger })
+  // 夜里的读书问询：默认关，本地 profile 打开才有（见 config.js 的 reading* 一组）
+  const reading = createReading({ config, manager, logger })
   // 睡着的会话不回收：回收后 tick/wake 都遍历不到它，早上攒的消息就交不出去
   manager.keeper = (record) => bedtime.isHolding(record)
   const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime, bridge, pin })
@@ -516,6 +525,7 @@ const pin = createPin({ config, logger })
   }
   wake.start()
   bedtime.start()
+  reading.start()
 
   try {
     registerTools(ctx, { client, manager, config, logger, pin, wake, noteSelfSaid })
@@ -539,6 +549,7 @@ const pin = createPin({ config, logger })
     client.stop()
     wake.stop()
     bedtime.stop()
+    reading.stop()
     manager.stop()
     approval.cancelAll()
     questions.cancelAll()

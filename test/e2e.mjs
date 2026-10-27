@@ -7,9 +7,20 @@
  *       群聊入站 → requireMention 门槛 → 白名单拒绝。
  */
 import assert from 'node:assert/strict'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { startMockNapcat } from './mock-napcat.mjs'
 import { apply, Config } from '../src/index.js'
 import { buildChatPrompt } from '../src/prompts.js'
+
+// ⭐ 每次跑都换一套干净的「家」和「工作区」。
+// 不隔离的后果（2026-10-27 20:4x 踩到）：e2e 会把会话、注入账本写到仓库里的 `会话/`
+// 和 `~/.dsh/dsh-qq/`，第二次跑时 record 从盘上恢复、`chatPromptInjected` 还是 true，
+// 于是「聊天规矩」不再注入，persona 断言就红了 —— 测试看起来是坏的，其实是不幂等。
+const E2E_HOME = mkdtempSync(join(tmpdir(), 'dsh-qq-e2e-home-'))
+process.env.DSH_HOME = E2E_HOME
+const E2E_WORKSPACE = mkdtempSync(join(tmpdir(), 'dsh-qq-e2e-ws-'))
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -78,6 +89,8 @@ const { ctx, created } = createFakeCtx()
 const config = Config({
   wsUrl: `ws://127.0.0.1:${PORT}`,
   accessToken: TOKEN,
+  // 会话文件、聊天记录、事实卡都写到临时工作区，别落进仓库的 `会话/`
+  workspaceRoot: E2E_WORKSPACE,
   requireMention: true,
   groupMode: 'open',
   privateMode: 'open',

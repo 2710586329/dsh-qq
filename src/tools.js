@@ -82,6 +82,18 @@ function needRecord(manager, exec) {
   return record
 }
 
+/**
+ * 夜里的读书问询轮：这一轮说什么都不往外走。
+ *
+ * 正文那条路由 index.js 的 send() 硬拦；工具这条路由这里拦 —— 不拦的话，
+ * 它一句「我睡不着」用 qq_send 发出去，半夜就把姐姐手机震醒了。
+ */
+function assertQuiet(record) {
+  if (record?.quietRound) {
+    throw new Error('这一轮是夜里的读书问询，不往外发消息——想说什么等早上')
+  }
+}
+
 function peerOf(record) {
   return record.scope === 'group'
     ? { group_id: Number(record.peerId) }
@@ -556,6 +568,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
+      assertQuiet(record)
       const file = String(args?.file ?? '').trim()
       if (!file) throw new Error('qq_send_image: file 不能为空')
       // 图片也算「发图」，跟表情包共用同一个节奏闸
@@ -601,6 +614,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
+      assertQuiet(record)
       const id = String(args?.id ?? '').trim()
       if (!id) throw new Error('qq_face: id 不能为空')
       const action = record.scope === 'group' ? 'send_group_msg' : 'send_private_msg'
@@ -739,6 +753,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
+      assertQuiet(record)
       const text = String(args?.text ?? '')
       if (!text) throw new Error('qq_reply: text 不能为空')
       assertOutboundText(config, logger, text)
@@ -798,6 +813,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
+      assertQuiet(record)
       const text = String(args?.text ?? '')
       if (!text) throw new Error('qq_send: text 不能为空')
       assertOutboundText(config, logger, text)

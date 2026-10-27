@@ -2,6 +2,16 @@
 
 本文件记录 dsh-qq 的版本变更。格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号照 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.2.3] - 2026-10-27
+
+### 新增
+
+- **夜里的读书问询（默认关，只有本地开）**：老三在 QQ 里提的——「半夜就算醒着，嚎一嗓子也没人应，还怕把姐姐吵着。要是能有那种不开口的轮次，只让本姑娘自己翻两页书，那我就收下」。做法不是命令它去读，是夜里按 `readingHours` 的节奏投一轮**问询**（问它要不要看会儿书），**它可以拒绝**，拒绝就什么都不用做。这一轮里它说的话、调的发送工具**一律发不出去**：`send()` 里和 `qq_send` / `qq_reply` / `qq_send_image` / `qq_face` 里都硬拦了一道 `record.quietRound`，光靠提示词说不稳。书签上「下次从哪接」的章号超过 `readingChapterDir` 里最大章号，就不再问——问了也只能得到一句「没得看了」。`readingEnabled` 默认 `false`，发布版用户完全不受影响。`test/reading-ask.test.mjs`。
+
+### 修复
+
+- **`test/e2e.mjs` 不再污染仓库和本机配置**：它原来没隔离 `workspaceRoot`，会话文件写进仓库的 `会话\`、注入账本写进 `~/.dsh/dsh-qq/inject-state.json`——于是**同一个测试跑第二遍必红**（record 从盘上恢复后 `chatPromptInjected` 还是 true，人设那两千多字不再注入，`persona 应该拼进首条投递` 就挂了），看着像代码坏了，其实是测试不幂等。现在用 `mkdtempSync` 出临时 `DSH_HOME` 和工作区。
+
 ## [1.2.2] - 2026-10-27
 
 ### 安全
