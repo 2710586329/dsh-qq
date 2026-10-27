@@ -6,7 +6,7 @@ import { textSegments } from './onebot/segment.js'
 import { SessionManager } from './session.js'
 import { createInbound, historyLine, pushHistory } from './inbound.js'
 import { appendChatLog } from './chatlog.js'
-import { SILENT_MARKER, personaLeaks } from './prompts.js'
+import { SILENT_MARKER, personaLeaks, stripSilentMark } from './prompts.js'
 import { createOutbound } from './outbound.js'
 import { createBridge } from './bridge.js'
 import { createPin } from './pin.js'
@@ -341,19 +341,25 @@ const pin = createPin({ config, logger })
     // 出口只在「这条不一定是在叫它」时给（见 inbound.js 的 mustReply），
     // 被 @、被引用、私聊都不会走到这里。
     const trimmed = String(text ?? '').trim()
-    if (trimmed === SILENT_MARKER) {
-      logger.info(`[dsh-qq] ${record.label} 选择不接话（${SILENT_MARKER}）`)
-      // 沉默不该扣主动开口的额度：机会白给，她想开口的话下次还有（2026-10-26）
-      wake.noteProactiveSilent(record)
+    // 2026-10-27 21:4x 修：原来只认「整条恰好就是 [SILENT]」，
+    // 她要是写成「结束这轮，不再说话。[SILENT]」，标记根本不生效，前半句照发。
+    // 现在先把标记剥掉：剥完只剩空白＝她选了潜水；还剩话＝照发剩下的。
+    const spoken = stripSilentMark(trimmed)
+    if (!spoken) {
+      if (trimmed.includes(SILENT_MARKER)) {
+        logger.info(`[dsh-qq] ${record.label} 选择不接话（${SILENT_MARKER}）`)
+        // 沉默不该扣主动开口的额度：机会白给，她想开口的话下次还有（2026-10-26）
+        wake.noteProactiveSilent(record)
+      }
       return
     }
-    const chunks = splitText(text, config.textChunkLimit)
+    const chunks = splitText(spoken, config.textChunkLimit)
     if (chunks.length === 0) return
 
     // 外发审计：本机路径 / 凭据整条拦下。流式、整段、报错提示都从这里出去，
     // 所以闸放在 split 之后、真正调 OneBot 之前，一处堵死。
     if (config.auditOutbound !== false) {
-      const verdict = auditOutbound(trimmed, {
+      const verdict = auditOutbound(spoken, {
         extraPatterns: config.auditExtraPatterns ?? [],
       })
       if (!verdict.ok) {
@@ -405,7 +411,8 @@ const pin = createPin({ config, logger })
 
     // 自己发出去的话也要进历史：不然下一轮它看不见「我说过什么」，
     // 群里口吻相近的别的机器人一开口，就会当成自己说的去道歉、去撤回。
-    if (sentAny) noteSelfSaid(record, trimmed)
+    // 记 spoken 不记 trimmed —— 历史里不该留 [SILENT] 这个标记本身。
+    if (sentAny) noteSelfSaid(record, spoken)
 
     // 发完了，取消「正在输入」
     if (!isGroup) {

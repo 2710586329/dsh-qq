@@ -468,11 +468,48 @@ export function stripMetaTalk(text) {
 }
 
 /**
+ * 收尾的元话：她是在跟自己交代状态，不是在跟人说话。
+ *
+ * 2026-10-27 21:22 事故：那轮她想了半天要不要开口，最后正文写了
+ * 「结束这轮，不再说话。」——这句本身被当成正文发到了 QQ 上。
+ * 她要表达的是「这条不发」，可这句里既没有称呼、也不够短，兜底的白名单漏过了。
+ *
+ * 判据收得很窄：**以收尾词开头 + 全句没有称呼** 才算。
+ * 「姐姐晚安，我先睡了」有称呼，照发；「结束这轮，不再说话。」没有，丢。
+ */
+const CLOSING_HEAD = /^(结束|这轮|本轮|收工|先这样|到此|就到这里|话说到这)/
+export function stripClosingTalk(text) {
+  const src = String(text ?? '').trim()
+  if (!src) return ''
+  return src
+    .split(/\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .filter((seg) => !(CLOSING_HEAD.test(seg) && !SPEECH_MARK.test(seg)))
+    .join('\n')
+    .trim()
+}
+
+/**
  * 这些工具**自己就会把话发出去**。
  * 一旦某个 turn 里用了它们，本轮的 assistant 文本就不能再自动转发一遍，
  * 否则 QQ 上会出现「同样一句话连着两条」的鬼影。
+ *
+ * 2026-10-27 21:4x 修：原来写的是 `qq_send_text` / `qq_send_message`，
+ * 这两个工具名**从来就不存在**（真实注册的是 `qq_send`，见 tools.js 的注册清单）。
+ * 结果她用 `qq_send` 发完话，这里认不出来，`selfSent` 一直空着 ——
+ * 后面那条纯文本（「结束这轮，不再说话。」）就照样被当成正文又发了一遍。
+ * 只收「说话类」工具；qq_poke / qq_react / qq_like 是互动不是发言，
+ * 放进来的话，她点个赞就把正经回话拦掉了。
  */
-const SELF_SENDING_TOOLS = new Set(['qq_reply', 'qq_send_text', 'qq_send_message'])
+const SELF_SENDING_TOOLS = new Set([
+  'qq_reply',
+  'qq_send',
+  'qq_send_image',
+  'qq_send_file',
+  'qq_face',
+  'qq_mface',
+])
 
 export function createOutbound({ manager, config, logger, send, wake }) {
   const lastSent = new Map() // sessionId -> 上一条完整文本（去重用）
@@ -563,6 +600,10 @@ export function createOutbound({ manager, config, logger, send, wake }) {
         return
       }
       let text = stripLeakedThinking(extractText(data.message))
+      // 2026-10-27 21:4x：正常正文也过一遍收尾元话。
+      // 以前只有「正文为空、兜底捞 reasoning」那条路才剥，所以
+      // 「结束这轮，不再说话。」这种宣告句直接从正文流出去了。
+      text = stripClosingTalk(text)
       // 模型偶尔把答案整个写进 reasoning，text 块是空的（2026-10-26 17:15、17:16 各一次：
       // turn 正常结束，QQ 那边一个字都没收到）。退回去取 reasoning 的尾段当正文。
       // 2026-10-27 09:42 起加护栏：带工具调用的消息不兜底（那是动手前的盘算，不是话）。

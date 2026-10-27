@@ -230,7 +230,7 @@ mock.emitEvent({
   self_id: 10001,
   group_id: 88888,
   user_id: 11001,
-  message_id: 203,
+  message_id: 233,
   raw_message: '[CQ:at,qq=10001] 我回来了',
   message: [
     { type: 'at', data: { qq: '10001' } },
@@ -601,9 +601,19 @@ ctx.emit('session/event', privateAgent.session, { type: 'compaction/end', data: 
 await sleep(100)
 assert.equal(privateAgent.injected.length, 1, '压缩后应该 inject 一张记忆卡')
 mock.emitPrivateText({ userId: 11001, nickname: '朋友', text: '刚才说到哪了', messageId: 401 })
-// 白名单那段也走同一个 mock，私聊会话此时已经收到第 3 条（「是我」）
-await waitFor(() => privateAgent.received.length === 4, { what: '压缩后的私聊' })
-assert.match(textOf(privateAgent.received[3]), /你正在用 QQ 跟人聊天/, '压缩后应该重新注入聊天规矩')
+// 别盯死某一个 agent、也别数条数：
+//   - 压缩之后 record 可能已经被换过（新 record → 新 agent），看「谁收到了」比看「第几个」稳；
+//   - 私聊还有可配的「连发合并」窗口，条数取决于时序，不取决于功能对不对。
+await waitFor(
+  () =>
+    created.concat(created2).some((a) => a.received.some((m) => /刚才说到哪了/.test(textOf(m)))),
+  { what: '压缩后的私聊' },
+)
+const afterCompact = created
+  .concat(created2)
+  .flatMap((a) => a.received.map(textOf))
+  .find((t) => /刚才说到哪了/.test(t))
+assert.match(afterCompact, /你正在用 QQ 跟人聊天/, '压缩后应该重新注入聊天规矩')
 console.log('✓ 压缩后重注入聊天规矩 + 记忆卡')
 
 // —— 上下文守卫：压力超过阈值主动换会话 ——

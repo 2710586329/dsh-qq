@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import {
   buildChatPrompt,
   personaLeaks,
+  stripSilentMark,
   SELF_KNOWN_RULE,
   ANON_RULE,
   BUILTIN_RULES,
@@ -154,6 +155,23 @@ t('groupPrompt 落在人设之前', () => {
     { isGroup: true },
   )
   assert.ok(p.indexOf('别聊政治') < p.indexOf(PERSONA))
+})
+
+console.log('出口 · [SILENT] 标记')
+t('整条就是 [SILENT] 时剥成空串', () => {
+  assert.equal(stripSilentMark('[SILENT]'), '')
+  assert.equal(stripSilentMark('  [SILENT]  '), '')
+})
+
+t('[SILENT] 跟在后面也认（21:22 那条就是这种写法）', () => {
+  assert.equal(stripSilentMark('结束这轮，不再说话。[SILENT]'), '结束这轮，不再说话。')
+  assert.equal(stripSilentMark('[SILENT]\n本姑娘不说话了'), '本姑娘不说话了')
+})
+
+t('没有标记的正文原样留着', () => {
+  assert.equal(stripSilentMark('姐姐晚安'), '姐姐晚安')
+  assert.equal(stripSilentMark(''), '')
+  assert.equal(stripSilentMark(undefined), '')
 })
 
 console.log(`\n${fail === 0 ? '全部通过 🎉' : '有失败'}  ${pass}/${pass + fail}`)

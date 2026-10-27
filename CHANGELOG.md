@@ -2,6 +2,16 @@
 
 本文件记录 dsh-qq 的版本变更。格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号照 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.2.4] - 2026-10-27
+
+### 修复
+
+- **「结束这轮，不再说话。」被当成正文发了出去**（2026-10-27 21:22 老三在 QQ 上实测）。三个洞叠在一起：
+  - `SELF_SENDING_TOOLS` 里写的是 `qq_send_text` / `qq_send_message`——**这两个工具从来不存在**，所以它用 `qq_send` 发完话，出口不知道「这轮已经说过了」，正文再补一遍。现在换成真实注册的名字（`qq_send` / `qq_reply` / `qq_send_image` / `qq_send_file` / `qq_face` / `qq_mface`）。
+  - 正常正文从不过 `stripMetaTalk`，只有「没正文但有工具调用」的兜底路径才剥——于是它跟自己交代的那句直接流了出去。新增 `stripClosingTalk()`：以「结束 / 这轮 / 本轮 / 收工 / 先这样 / 到此 / 就到这里 / 话说到这」开头、**又不含称呼**的段落一律不发（带称呼的当是在跟人说话，照留）。
+  - `[SILENT]` 只在「整条恰好等于它」时生效，写成「……[SILENT]」就失效。新增 `stripSilentMark()`，剥掉标记后看还剩不剩话。
+- 主动开口的提示词补一条：真不想说就只写 `[SILENT]`，别写「结束这轮」这种话——那不是跟人说话，是跟自己交代。
+
 ## [1.2.3] - 2026-10-27
 
 ### 新增

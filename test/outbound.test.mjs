@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createOutbound, extractText, reasoningTail, stripLeakedThinking } from '../src/outbound.js'
+import { createOutbound, extractText, reasoningTail, stripLeakedThinking, stripClosingTalk } from '../src/outbound.js'
 
 /**
  * 2026-10-26 17:15:24 和 17:16:06，QQ 上一条回复都没有，但 turn 正常结束。
@@ -38,7 +38,9 @@ function makeHarness({ sent = [] } = {}) {
       { id: 's1' },
       { type: 'assistant/message', sessionId: 's1', data: { message } },
     )
-  return { fire, sent }
+  const tool = (name) =>
+    onSessionEvent({ id: 's1' }, { type: 'tool/call', sessionId: 's1', data: { name } })
+  return { fire, sent, tool }
 }
 
 test('extractText 只认 text 块——纯 reasoning 拿到空串', () => {
@@ -375,5 +377,59 @@ test('整段两行之间的换行不能被吞（22:20:41 那条）', () => {
 
 test('日期里的连字符别拆成列表', () => {
   assert.equal(stripLeakedThinking('明天 2026-10-26 这天'), '明天 2026-10-26 这天')
+})
+
+/**
+ * 2026-10-27 21:22：老三在 QQ 上先发了一句真话，紧接着发出一行
+ * 「结束这轮，不再说话。」——那是她跟自己交代的话，被当成正文发了出去。
+ * 下面这几条就是钉这个洞：出口要认「宣告收尾」的句子，也要认工具发过话这件事。
+ */
+
+test('stripClosingTalk：宣告收尾的整句不发', () => {
+  assert.equal(stripClosingTalk('结束这轮，不再说话。'), '')
+  assert.equal(stripClosingTalk('本轮到此为止。'), '')
+  assert.equal(stripClosingTalk('先这样，睡觉去了'), '')
+})
+
+test('stripClosingTalk：带称呼的当是在说话，照留', () => {
+  assert.equal(stripClosingTalk('姐姐晚安，我先睡了'), '姐姐晚安，我先睡了')
+})
+
+test('stripClosingTalk：混在一段的，只丢宣告那一行', () => {
+  assert.equal(stripClosingTalk('结束这轮，不再说话。\n姐姐晚安'), '姐姐晚安')
+  assert.equal(stripClosingTalk('姐姐晚安\n结束这轮'), '姐姐晚安')
+})
+
+test('stripClosingTalk：没以收尾词开头的不动', () => {
+  assert.equal(stripClosingTalk('完了这轮再说吧'), '完了这轮再说吧')
+  assert.equal(stripClosingTalk(''), '')
+})
+
+test('调过 qq_send 之后，正文不再补一遍（21:22 那条的第二半）', async () => {
+  const { fire, sent, tool } = makeHarness()
+  await tool('qq_send')
+  await fire({ content: [{ type: 'text', text: '今天这一天，本姑娘的脑子像被塞进了一整个书架' }] })
+  assert.deepEqual(sent, [], '工具已经发过话了，正文不该再发一次')
+})
+
+test('qq_reply / qq_send_image 也算发过话', async () => {
+  for (const name of ['qq_reply', 'qq_send_image']) {
+    const { fire, sent, tool } = makeHarness()
+    await tool(name)
+    await fire({ content: [{ type: 'text', text: '好呀' }] })
+    assert.deepEqual(sent, [], `${name} 之后不该再补正文`)
+  }
+})
+
+test('没调发送工具时，正文照发', async () => {
+  const { fire, sent } = makeHarness()
+  await fire({ content: [{ type: 'text', text: '姐姐晚安' }] })
+  assert.deepEqual(sent, ['姐姐晚安'])
+})
+
+test('正文整条都是收尾话时，一个字都不发', async () => {
+  const { fire, sent } = makeHarness()
+  await fire({ content: [{ type: 'text', text: '结束这轮，不再说话。' }] })
+  assert.deepEqual(sent, [])
 })
 
