@@ -17,7 +17,7 @@
  *    那段踩坑记录（当字符串用会把函数源码拼进路径，mkdir ENOENT，插件直接不激活）。
  * ============================================================================
  */
-import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync, readdirSync } from 'node:fs'
 import { join, resolve, dirname, basename } from 'node:path'
 import { homedir } from 'node:os'
 import { createServer } from 'node:http'
@@ -56,6 +56,7 @@ export const OVERRIDABLE = [
   'historyLimit',
   'groupMode',
   'groupAllow',
+  'addressedMaySilent',
   'privateMode',
   'privateAllow',
   'botChatEnabled',
@@ -559,6 +560,249 @@ export function loadFactsFor(record) {
   } catch {
     return ''
   }
+}
+
+/** 群词典文件的完整路径。跟 `learning.js` 写入的位置必须是同一个，改这里也要改那边。 */
+export function glossaryFileFor(record) {
+  const dir = String(record?.dir ?? '').trim()
+  return dir ? join(dir, '记忆区', '群词典.md') : ''
+}
+
+/**
+ * 把群词典压缩成能念的一小段。
+ * 头部那几行 `>` 是写给姐姐看的说明，念给它听纯占字数，去掉；
+ * 超过 `limit` 字就断在整行，并留一句「想看全文 read 那个文件」。
+ */
+export function clipGlossary(text, limit = 700) {
+  const body = String(text ?? '')
+    .split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith('>'))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  if (!body) return ''
+  if (body.length <= limit) return body
+  return `${body.slice(0, limit).replace(/\n[^\n]*$/, '')}\n（后面的没念完，要看全文就 read）`
+}
+
+/** 群聊时把本群那本词典念一小段；私聊、文件不存在、内容为空都返回 ''。 */
+export function loadGlossaryFor(record, { limit = 700 } = {}) {
+  const file = glossaryFileFor(record)
+  if (!file) return ''
+  try {
+    if (!existsSync(file)) return ''
+    return clipGlossary(readFileSync(file, 'utf8'), limit)
+  } catch {
+    return ''
+  }
+}
+
+/** 从日记里挑一行 `> 一句话：…` 这类头信息。抽不到返回 ''。 */
+export function pickDigestLine(text, label) {
+  const re = new RegExp(`^>\\s*${label}\\s*[：:]\\s*(.+)$`, 'm')
+  const m = re.exec(String(text ?? ''))
+  return m ? m[1].trim() : ''
+}
+
+function clipLine(s, limit) {
+  const t = String(s ?? '').trim()
+  if (!limit || t.length <= limit) return t
+  return `${t.slice(0, limit)}…`
+}
+
+/** 聊天记录一行的样子：`- 00:08:57 · 昵称(3027160989)：说话内容`。 */
+const CHAT_LINE_RE = /^- (\d{2}:\d{2}:\d{2}) · (.+?)\((\d{3,12})\)[：:]\s*(.*)$/
+
+/**
+ * 从一个群的聊天记录里抽「尾巴」：最后谁说了话，以及有没有人点了她名她没应。
+ * ============================================================================
+ * 老三 2026-10-27 11:43 原话：「头两行只够闻个味，一天的肉都在后半段。不如给我尾巴：
+ * 谁最后说话、有没人点我名我没应着，这种我才真想知道。量不用加，换个位置就行。」
+ *    → 她要的不是「今天聊了啥」，是「现在有没有我的事」——那在结尾。
+ *
+ * @param {string} text 聊天记录全文
+ * @param {{ gid?: string, me?: string, tailCount?: number, limit?: number }} opts
+ * @returns {string[]} 最多两行
+ */
+function tailLinesFromChat(text, { gid = '', me = '', tailCount = 2, limit = 240 } = {}) {
+  const recs = []
+  for (const raw of String(text ?? '').split(/\r?\n/)) {
+    const m = CHAT_LINE_RE.exec(raw.trim())
+    if (!m) continue
+    recs.push({ at: m[1], who: m[2].trim(), id: m[3], said: m[4].trim() })
+  }
+  const others = recs.filter((r) => r.id !== me)
+  if (!others.length) return []
+
+  const last = others[others.length - 1]
+  const atMe = me ? others.filter((r) => r.said.includes(`@${me}`)).pop() : null
+  const stripAt = (s) => String(s ?? '').split(`@${me}`).join('').trim()
+
+  const out = []
+  if (atMe === last) {
+    // 最后一句就是点她名：这行本身最要紧，别再重复一遍
+    out.push(`· 群 ${gid}：最后 ${last.at} ${last.who} 点了你名「${clipLine(stripAt(last.said), limit)}」——你没应`)
+    return out
+  }
+  out.push(`· 群 ${gid}：最后 ${last.at} ${last.who} 说「${clipLine(last.said, limit)}」`)
+  if (tailCount > 1 && others.length > 1) {
+    const prev = others[others.length - 2]
+    if (prev !== atMe) out.push(`  ↑前一句 ${prev.at} ${prev.who}：「${clipLine(prev.said, limit)}」`)
+  }
+  if (atMe) out.push(`  ⚠ ${atMe.at} ${atMe.who} 点过你名：「${clipLine(stripAt(atMe.said), 120)}」`)
+  return out
+}
+
+/**
+ * 私聊时递的「纸条」：别的群**今天**的尾巴。
+ * ============================================================================
+ * 读的是 `聊天记录/<今天>.md` 的结尾，不是日记头两行（2026-10-27 按老三的要求换的）。
+ * 当天群里没人说话时，才退回日记的 `> 一句话：`。
+ *
+ * 切法为什么这么定：日记正文和聊天记录正文都是第一人称/大段叙事，让她跨窗口读到
+ * 另一个自己写的东西，会有「这是谁写的 / 这不像我」的风险——2026-10-27 09:42 已经
+ * 出过一次（同一个窗口、只跨了一个轮次，她就不认识自己写的日记了）。
+ * 而「最后谁说了话、有没有人点我名」是纯事实，谁写都一样，递过去不会晃她。
+ *
+ * 关键区别：这是**插件递过来的纸条**，不是她去翻本子。她什么都没「读」过。
+ *
+ * @param {{ workspaceRoot?: string, today?: string, selfId?: string }} opts
+ * @returns {string} 多行文本；没有群、没有记录时返回 ''
+ */
+export function loadGroupDigest({ workspaceRoot, today, selfId = '' } = {}, { limit = 240, tailCount = 2 } = {}) {
+  const root = String(workspaceRoot ?? '').trim()
+  const day = String(today ?? '').trim()
+  if (!root || !day) return ''
+  let names = []
+  try {
+    names = readdirSync(root, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && /^群_/.test(d.name))
+      .map((d) => d.name)
+      .sort()
+  } catch {
+    return ''
+  }
+  const me = String(selfId ?? '').trim()
+  const rows = []
+  for (const name of names) {
+    const gid = name.replace(/^群_/, '')
+    const dir = join(root, name)
+    let lines = []
+    // ① 先看聊天记录的尾巴——她要的「谁最后说话、有没有人点我名」都在这儿
+    try {
+      const chat = join(dir, '聊天记录', `${day}.md`)
+      if (existsSync(chat)) lines = tailLinesFromChat(readFileSync(chat, 'utf8'), { gid, me, tailCount, limit })
+    } catch {
+      // 单个群读坏了（编码、锁、半截文件）不该连累别的群
+    }
+    // ② 今天群里没人说话，才退回日记的「一句话」
+    if (!lines.length) {
+      try {
+        const file = join(dir, '记忆区', '日记', `${day}.md`)
+        if (existsSync(file)) {
+          const gist = pickDigestLine(readFileSync(file, 'utf8'), '一句话')
+          if (gist) lines = [`· 群 ${gid}（今天没人说话）：${clipLine(gist, limit)}`]
+        }
+      } catch {
+        // 同上，坏一个不连累别的
+      }
+    }
+    rows.push(...lines)
+  }
+  return rows.join('\n')
+}
+
+/** 群词典的空骨架（第一次写时铺这份）。 */
+export const GLOSSARY_SKELETON = `# 群词典 · 群聊黑话与角色
+
+> 群鲸鲸自己卡壳的地方。**待确认** = 它没接住的；弄明白意思后自己挪到**已确认**。
+> 这本是它自己的笔记，别借别人的词硬编。
+
+## 待确认
+
+## 已确认
+
+| 词 / 说法 | 意思 | 谁说的 | 日期 |
+| --- | --- | --- | --- |
+`
+
+function mdCell(s, limit = 40) {
+  const t = String(s ?? '').replace(/\s+/g, ' ').replace(/\|/g, '\\|').trim()
+  return t.length > limit ? `${t.slice(0, limit)}…` : t
+}
+
+/** 本地时区的今天。别用 toISOString —— UTC 在 +08 的凌晨会算成昨天。 */
+function localDayStr() {
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/**
+ * 把「弄明白了的一个词」写进某个群词典的「已确认」，顺手清掉对应的「待确认」条目。
+ * ============================================================================
+ * 2026-10-27 给老三造的「笔」。她在私聊里够不到 `群_<gid>/记忆区/群词典.md`
+ * （沙箱只圈自己那块地），群聊里够得到、可她当时想不起来要填。
+ *
+ * **这只笔只有一个落点**：`<workspaceRoot>/群_<纯数字>/记忆区/群词典.md`。
+ * 参数里没有路径，群号必须是纯数字且目录已存在——她就算想问「写群日记」
+ * 也没地方填。不靠她自觉，靠函数签名就写不了别的。
+ *
+ * @returns {{ file: string, text: string }}
+ */
+export function upsertGlossaryTerm({ workspaceRoot, group, word, meaning, who = '', date = '' }) {
+  const root = String(workspaceRoot ?? '').trim()
+  if (!root) throw new Error('没配 workspaceRoot，找不到群目录')
+  const gid = String(group ?? '').trim()
+  if (!/^\d{3,20}$/.test(gid)) throw new Error(`群号得是纯数字，收到：${gid || '(空)'}`)
+  const w = String(word ?? '').trim()
+  const m = String(meaning ?? '').trim()
+  if (!w) throw new Error('要填的词不能是空的')
+  if (!m) throw new Error('意思不能是空的')
+  const peerDir = join(root, `群_${gid}`)
+  if (!existsSync(peerDir)) throw new Error(`群 ${gid} 的目录不存在：${peerDir}`)
+  const file = join(peerDir, '记忆区', '群词典.md')
+
+  let text = ''
+  try {
+    text = existsSync(file) ? readFileSync(file, 'utf8') : ''
+  } catch {
+    text = ''
+  }
+  if (!text.trim()) text = GLOSSARY_SKELETON
+
+  // ① 清掉「待确认」里跟这个词对上的那条（含它下面那行 ↳ 说明）
+  const lines = text.split(/\r?\n/)
+  const kept = []
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (/^- \[ \]/.test(line) && line.includes(w)) {
+      const next = lines[i + 1] ?? ''
+      if (/^\s{2,}↳/.test(next)) i += 1
+      continue
+    }
+    kept.push(line)
+  }
+  text = kept.join('\n')
+
+  // ② 追加进「已确认」的表格末尾
+  const row = `| ${mdCell(w)} | ${mdCell(m, 80)} | ${mdCell(who, 24)} | ${mdCell(date || localDayStr(), 12)} |`
+  const at = text.indexOf('## 已确认')
+  if (at < 0) {
+    text = `${text.trimEnd()}\n\n## 已确认\n\n| 词 / 说法 | 意思 | 谁说的 | 日期 |\n| --- | --- | --- | --- |\n${row}\n`
+  } else {
+    const head = text.slice(0, at)
+    const rows = text.slice(at).split('\n')
+    let lastTable = -1
+    for (let i = 0; i < rows.length; i += 1) if (/^\|/.test(rows[i])) lastTable = i
+    if (lastTable >= 0) rows.splice(lastTable + 1, 0, row)
+    else rows.push('', '| 词 / 说法 | 意思 | 谁说的 | 日期 |', '| --- | --- | --- | --- |', row)
+    text = head + rows.join('\n')
+  }
+
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, text, 'utf8')
+  return { file, text }
 }
 
 /** 从事实卡全文里挑出「全局」+「会话 <label>」两节；标题允许带不带「会话 」前缀。 */export function pickFacts(text, label) {

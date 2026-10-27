@@ -35,6 +35,11 @@ export const ConfigSchema = Schema.object({
   workspaceRoot: Schema.string()
     .default('')
     .description('每个 QQ 会话的独立工作目录放在哪里；留空用 <cwd>/会话'),
+  doorDir: Schema.string()
+    .default('')
+    .description(
+      '「门口」信箱目录：别的窗口（比如大姐）给它留的话，每封一个 .md 文件。留空则关闭。填了以后每轮提示词里会多一行「门口有 N 封」，但**不给内容** —— 它自己 read 才看得到，拆不拆随它，不催不推',
+    ),
   isolateByPeer: Schema.boolean()
     .default(true)
     .description('每个私聊/每个群各自一个工作目录与记忆区（互不可见，也不碰宿主的私人记忆区）'),
@@ -47,6 +52,11 @@ export const ConfigSchema = Schema.object({
     .default('')
     .description(
       '人设文件路径（比如 D:/某个角色.md）。填了就从这个文件读人设，覆盖上面的 persona；文件读不到时保留 persona，不会把角色弄丢',
+    ),
+  personaInSystem: Schema.boolean()
+    .default(false)
+    .description(
+      '人设已经由宿主的系统提示（profile 里 system-prompt 的 personaPrefix）带着时设 true：插件不再把 persona 拼进每条消息。人设放对话历史里会被模型当成「上一轮说过的话」、还会被压缩器当聊天搅进去；放系统提示里只说一次、不进历史。留 false 维持旧行为',
     ),
   ownerIds: Schema.array(Schema.string())
     .default([])
@@ -120,6 +130,11 @@ export const ConfigSchema = Schema.object({
   groupWakeNames: Schema.array(Schema.string())
     .default([])
     .description('额外的称呼，除了 QQ 昵称以外还算作叫它（如 大肥鱼、鲸鲸、鲸鱼娘）'),
+  addressedMaySilent: Schema.boolean()
+    .default(false)
+    .description(
+      '群里被 @ / 被引用 / 被点名时，允许它看完不说话（默认 false = 被叫必须回）。开了以后消息照样进上下文，只是不再强制开口',
+    ),
   replyToPrivate: Schema.boolean()
     .default(true)
     .description('是否响应私聊'),

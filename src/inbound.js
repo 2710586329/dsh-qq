@@ -3,9 +3,17 @@ import { readMessage } from './onebot/segment.js'
 import { rememberFaces, facesCount, facesForPrompt } from './faces.js'
 import { buildChatPrompt, faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT, SILENT_HINT } from './prompts.js'
 import { evaluateWakeTrigger, rollWakeProbability } from './wake-trigger.js'
-import { factsFileFor, loadFactsFor, loadHandoffFor } from './settings.js'
+import { doorLine } from './door.js'
+import {
+  factsFileFor,
+  glossaryFileFor,
+  loadFactsFor,
+  loadGlossaryFor,
+  loadGroupDigest,
+  loadHandoffFor,
+} from './settings.js'
 import { resolvePeerWorkspace } from './workspace.js'
-import { appendChatLog } from './chatlog.js'
+import { appendChatLog, CHATLOG_DIR, UNAUTHORIZED_LOG_DIR } from './chatlog.js'
 import { mkdir, writeFile, readdir, unlink } from 'node:fs/promises'
 import { join, extname } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -219,6 +227,12 @@ function periodOf(hour) {
 
 const pad2 = (n) => String(n).padStart(2, '0')
 
+/** 本地时区的今天 YYYY-MM-DD。
+ *  ⚠️ 别用 `toISOString().slice(0,10)` —— 那是 UTC，+08 时区凌晨 0–8 点会算成昨天。 */
+function localDay(d = new Date()) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+}
+
 /** 人话时间（完整版）：2026-10-24 周六 13:05（下午）。
  *  直接给模型一句能照念的话，别让它拿 ISO 时间戳自己换算白天晚上。 */
 function humanTime(d = new Date()) {
@@ -234,6 +248,28 @@ function historyTime(d = new Date()) {
  *  sender 在 ownerIds 里时额外标上主人称呼，Agent 才分得清自己人和群友。
  *  isSelf=true 时写成「你（机器人名）」—— 自己发出去的话也必须进历史，
  *  否则它看不到自己说过什么，群里另一个口吻相近的机器人一说话，就会被认领成「我说的」。 */
+/**
+ * 这一轮「必须回」还是「可以沉默」。
+ *
+ * - 私聊、补发（replay）：必须回 —— 那是冲它来的正经话，别装死。
+ * - 群里被 @ / 被引用 / 被叫名字点名（addressedBy）：默认必须回；
+ *   2026-10-27 姐姐定「群里主动 @ 一直不开」，`addressedMaySilent` 打开后
+ *   被叫照样叫得醒（消息进上下文、能看能开口），但回不回它自己定。
+ * - 群里没被叫（概率唤醒 / 保活窗路过）：可以沉默。
+ */
+export function mustReplyFor({
+  isGroup,
+  atMe = false,
+  quotedMe = false,
+  isReplay = false,
+  addressedBy = null,
+  addressedMaySilent = false,
+} = {}) {
+  if (!isGroup || isReplay) return true
+  const addressed = Boolean(atMe || quotedMe || addressedBy)
+  return addressed && addressedMaySilent !== true
+}
+
 export function historyLine(sender, text, { isOwner = false, ownerLabel = '主人', isSelf = false, selfName = '机器人', isBot = false } = {}) {
   if (isSelf) return `[你（${selfName || '机器人'}） ${historyTime()}] ${text}`
   const name = sender?.card || sender?.nickname || String(sender?.user_id ?? '')
@@ -294,11 +330,69 @@ function guessExt(url, mime) {
   return ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].includes(fromUrl) ? fromUrl : '.png'
 }
 
+const FORWARD_MAX_ITEMS = 30
+const FORWARD_MAX_CHARS = 2000
+
+/**
+ * 合并转发（群里那张「聊天记录」卡片）展开成纯文本。
+ *
+ * OneBot 的 forward 段只带一个 id，内容要另外调 get_forward_msg 取。
+ * 不展开的话，agent 在群里只看得见「[合并转发]」四个字——等于那段话没说过。
+ * 取不到就如实标出来，别装成看见了。
+ */
+export async function expandForwards(client, forwards, { logger } = {}) {
+  if (!Array.isArray(forwards) || forwards.length === 0) return ''
+  const out = []
+
+  for (const f of forwards) {
+    if (!f?.id) {
+      out.push('[合并转发·拿不到 id]')
+      continue
+    }
+
+    let res
+    try {
+      // NapCat 认 message_id，标准 OneBot 写 id——两个都递过去，谁认谁接
+      res = await client.call('get_forward_msg', { message_id: f.id, id: f.id })
+    } catch (err) {
+      logger?.debug?.(`[dsh-qq] 合并转发取不到（${f.id}）：${err?.message || err}`)
+      out.push('[合并转发·展开失败]')
+      continue
+    }
+
+    const list = Array.isArray(res?.messages) ? res.messages : res?.message ? [res] : []
+    if (list.length === 0) {
+      out.push('[合并转发·空的]')
+      continue
+    }
+
+    const lines = []
+    let used = 0
+    for (const item of list) {
+      if (lines.length >= FORWARD_MAX_ITEMS || used >= FORWARD_MAX_CHARS) {
+        lines.push(`…（还差 ${list.length - lines.length} 条没放进来，太长了）`)
+        break
+      }
+      const who = String(item?.sender?.card || item?.sender?.nickname || item?.sender?.user_id || '?')
+      const body = readMessage(item?.message, {}).text || '[无文字]'
+      const line = `${who}：${body}`
+      used += line.length
+      lines.push(line)
+    }
+    out.push(`[合并转发 ${list.length} 条]\n${lines.join('\n')}`)
+  }
+
+  return out.join('\n')
+}
+
 /**
  * 下载一张图到本地缓存，返回绝对路径；失败返回 null。
  * 只接受 http(s) 和 base64:// 两种来源。
+ *
+ * export 出去是因为 `qq_images`（tools.js）也要用同一条下载路径：
+ * 按消息 id 现取图的时候，落到跟收消息一样的缓存目录里，用完能一起被清。
  */
-async function downloadImage(url, cacheDir, maxMB) {
+export async function downloadImage(url, cacheDir, maxMB) {
   try {
     if (!url) return null
 
@@ -457,19 +551,33 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const peerBot = isGroup && isPeerBot(config, event.user_id, event)
     if (peerBot) ownerInfo.isBot = true
 
-    if (isGroup ? !allowGroup(config, peerId) : !allowPrivate(config, peerId)) {
-      logger.debug?.(`[dsh-qq] 忽略未授权 ${label}`)
-      return
-    }
-
+    const allowed = isGroup ? allowGroup(config, peerId) : allowPrivate(config, peerId)
     const info = readMessage(event.message, { selfId, selfName: event.self_name ?? '机器人' })
+
+    // 合并转发：卡片里的内容真的取出来，摆进正文，别只留一个「[合并转发]」。
+    // 取不到就保留占位——至少让人知道这里本来有东西。
+    if (info.forwards.length > 0) {
+      const expanded = await expandForwards(client, info.forwards, { logger })
+      if (expanded) info.text = info.text ? `${info.text}\n${expanded}` : expanded
+    }
 
     // 聊天流水：跳过的消息也先记下来——「它怎么突然接不上话」全靠这段回查。
     // 只落盘、不参与投递，写失败也不影响聊天。
+    // 白名单外的落到 `聊天记录/_未开通/`（2026-10-26 姐姐定的）：留痕，不投递。
     if (config.chatLog !== false) {
       const logDir = resolvePeerWorkspace(config, scope, peerId)
       const who = `${senderName}(${event.user_id})`
-      appendChatLog(logDir, { who, text: info.text || '[图片]' }, logger).catch(() => {})
+      appendChatLog(
+        logDir,
+        { who, text: info.text || '[图片]', msgId: event.message_id },
+        logger,
+        allowed ? undefined : join(CHATLOG_DIR, UNAUTHORIZED_LOG_DIR),
+      ).catch(() => {})
+    }
+
+    if (!allowed) {
+      logger.debug?.(`[dsh-qq] 忽略未授权 ${label}`)
+      return
     }
 
     // 纯图 / 纯语音 / 纯文件 / 纯表情包（没有文字）也要处理
@@ -806,7 +914,17 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 私聊、被 @、被引用回复这三种情况必须回，就不给出口 —— 该说话的时候别装死。
     // 2026-10-25 补：被叫名字 / 点名提问 / 关键词叫住的（addressedBy）也算被点名，同样必须回；
     // 只有「概率唤醒」那种路过看一眼的，才留 [SILENT] 出口。
-    const mustReply = !isGroup || info.atMe || quotedMe || isReplay || Boolean(addressedBy)
+    // 2026-10-27 姐姐定：群里「主动 @ 一直不开」——`addressedMaySilent` 打开后，
+    // 被叫照样叫得醒（消息进上下文、能看能开口），但不再非答不可，回不回它自己定。
+    // 规则本体在 mustReplyFor()，这里只负责把当前这一条的实况递进去。
+    const mustReply = mustReplyFor({
+      isGroup,
+      atMe: info.atMe,
+      quotedMe,
+      isReplay,
+      addressedBy,
+      addressedMaySilent: config.addressedMaySilent,
+    })
     if (!mustReply) parts.push(SILENT_HINT)
 
     if (imagePaths.length > 0) {
@@ -869,6 +987,21 @@ export function createInbound({ config, manager, logger, client, send, approval,
         faces: facesForPrompt(config, 12),
         facts: loadFactsFor(record),
         factsFile: factsFileFor(record),
+        // 群词典：这个群自己的黑话。私聊传空串，别把某个群的词带进私聊。
+        glossary: isGroup ? loadGlossaryFor(record) : '',
+        glossaryFile: glossaryFileFor(record),
+        // 纸条：私聊时告诉她「别的群今天的尾巴」——最后谁说了话、有没有人点她名没应。
+        //    群聊不传——她在那个群里，用不着有人替她讲。正文字一个字都不给。
+        groupDigest: isGroup
+          ? ''
+          : loadGroupDigest({
+              workspaceRoot:
+                String(config.workspaceRoot ?? '').trim() ||
+                join(String(config.cwd ?? '').trim() || process.cwd(), '会话'),
+              today: localDay(),
+              // 判断「哪条不是她发的」「有没有人 @ 她」，都要她自己的号
+              selfId: String(config.selfId ?? '').trim(),
+            }),
       })
       if (chatPrompt) parts.unshift(chatPrompt, '')
       // 主动换过会话：把上一段聊天的尾巴放最前面，让它知道刚聊到哪
@@ -881,7 +1014,10 @@ export function createInbound({ config, manager, logger, client, send, approval,
         )
       }
       record.swapSeed = null
-      record.chatPromptInjected = true
+      // ⭐ 2026-10-26 姐姐说「不能每次都发那么长一截」：标记也记到盘上。
+      // 宿主重启 / 闲置回收后 record 重建，靠 manager 的账本记住「这个会话注过了」。
+      if (typeof manager?.markChatPromptInjected === 'function') manager.markChatPromptInjected(record)
+      else record.chatPromptInjected = true
     }
 
     // 错过睡前提醒的补刀：会话是有人说话才建的，23:30 那一刻内存里可能一个会话都没有，
@@ -893,6 +1029,11 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 放在最前面 —— 不然她会把「没收到回应」读成对方的态度。
     const bridgeLines = bridge?.take?.(record) ?? []
     if (bridgeLines.length > 0) parts.unshift(...bridgeLines, '')
+
+    // 门口：大姐鲸鲸捎的话。只报「有几封、在哪」，内容她自己 read 才看。
+    // 2026-10-26 姐姐定的：不敲门、不占主动额度，只在她本来就要开口的这一轮里多一行。
+    const doorNotice = doorLine(config)
+    if (doorNotice) parts.unshift(doorNotice, '')
 
     const body = parts.join('\n')
 

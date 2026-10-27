@@ -15,6 +15,15 @@ import { join } from 'node:path'
 /** 流水目录名（在会话目录下）。 */
 export const CHATLOG_DIR = '聊天记录'
 
+/**
+ * 白名单外那些会话的流水子目录（`聊天记录/_未开通/`）。
+ *
+ * 2026-10-26 姐姐定的：群/人没开通，话也不投递，但**留一份痕**。
+ * 起因是 `群_415158497/聊天记录/` 停在 10-24 就没了，谁也说不清是「没人说话」
+ * 还是「被白名单挡了」——原来 `allowGroup` 的 return 在记流水之前，被挡的话一句都不留。
+ */
+export const UNAUTHORIZED_LOG_DIR = '_未开通'
+
 function pad(n) {
   return String(n).padStart(2, '0')
 }
@@ -33,24 +42,30 @@ export function clockOf(d = new Date()) {
  * 往会话目录里的当日流水追加一行。失败只记日志，绝不影响聊天。
  *
  * @param {string|null} dir 会话目录（resolvePeerWorkspace 的结果）
- * @param {{ who?: string, text?: string, time?: Date }} entry
+ * @param {{ who?: string, text?: string, time?: Date, msgId?: string|number }} entry
  * @param {*} [logger]
+ * @param {string} [sub] 子目录（默认 `聊天记录`；白名单外的传 `聊天记录/_未开通`）
  * @returns {Promise<boolean>} 是否真的写进去了
  */
-export async function appendChatLog(dir, entry = {}, logger) {
+export async function appendChatLog(dir, entry = {}, logger, sub = CHATLOG_DIR) {
   if (!dir) return false
   const said = String(entry.text ?? '').replace(/\r/g, '').trim()
   if (!said) return false
 
   const time = entry.time instanceof Date ? entry.time : new Date()
   const who = String(entry.who ?? '').trim() || '（未知）'
-  const file = join(dir, CHATLOG_DIR, `${dayOf(time)}.md`)
+  const file = join(dir, sub, `${dayOf(time)}.md`)
   // 多行消息压成一行，保留换行标记，便于之后按行读
   const body = said.replace(/\n+/g, ' ⏎ ')
-  const line = `- ${clockOf(time)} · ${who}：${body}\n`
+  // 消息编号留在行尾（`#msg=123456`，2026-10-27 加的）。
+  // 图只活在看图那一秒——那一轮没被叫醒，就再也没人知道那条消息里是张什么图；
+  // 留着号，事后能让 qq_images 把那条消息的图重新捞回来。
+  const msgId = String(entry.msgId ?? '').trim()
+  const tail = /^\d+$/.test(msgId) ? ` #msg=${msgId}` : ''
+  const line = `- ${clockOf(time)} · ${who}：${body}${tail}\n`
 
   try {
-    await mkdir(join(dir, CHATLOG_DIR), { recursive: true })
+    await mkdir(join(dir, sub), { recursive: true })
     await appendFile(file, line, 'utf8')
     return true
   } catch (err) {

@@ -188,6 +188,20 @@ const textOf = (message) => message?.content?.[0]?.text ?? ''
   s.stop()
 }
 
+// 4d) 群里到点不催睡（2026-10-26 夜：那句「该睡了」丢进群聊，
+//     接的是陌生群友的话，她于是对着人家喊「姐姐，快十一点半啦」）
+{
+  const g = fakeRecord('群乙', 'group')
+  const m = fakeManager([g])
+  m.capture(g)
+  const s = createSleep({ config: makeConfig(), manager: m, logger: {} })
+  s.start()
+  s.tick(new Date(2026, 9, 26, 23, 30))
+  await new Promise((r2) => setTimeout(r2, 10))
+  check('群里到点也不催睡', m.delivered.length, 0)
+  s.stop()
+}
+
 // 5) 总开关关掉：什么都不做
 {
   const r = fakeRecord('私聊戊')

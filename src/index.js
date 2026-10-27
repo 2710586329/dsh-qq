@@ -261,7 +261,7 @@ export function apply(ctx, config) {
   })
 
   let selfId = String(config.selfId ?? '')
-  const manager = new SessionManager({ agents, selfId, config, logger })
+  const manager = new SessionManager({ agents, selfId, config, logger, home: homeDirOf(ctx, logger) })
   manager.start()
 
   // 通道回执：断线 / 发送失败要让她知道（见 bridge.js 顶部那段起因）
@@ -286,6 +286,30 @@ const pin = createPin({ config, logger })
   }
 
   const lastSentAt = new Map() // 群聊里上一条发出去的毫秒时间，用来拉开间隔
+
+  /**
+   * 自己发出去的话进历史 + 落聊天流水。正文（send）和工具出口（qq_send / qq_reply / 发图…）共用。
+   *
+   * 2026-10-27 补：以前只有正文这条记账，工具发出去的话既不进流水、也不进 history，
+   * 结果她说过的话在记录里缺一句，下一轮自己也看不见，翻记录还会对不上。
+   */
+  function noteSelfSaid(record, said) {
+    const text = String(said ?? '').trim()
+    if (!record || !text) return
+    const selfName = manager.selfName || '机器人'
+    const entry = historyLine(null, text, { isSelf: true, selfName })
+    pushHistory(record, entry, config.historyLimit)
+    record.recent.push(entry)
+    const recentKeep = Math.max(80, (Number(config.contextMemoryKeep) || 30) * 3)
+    if (record.recent.length > recentKeep) record.recent.splice(0, record.recent.length - recentKeep)
+
+    // 聊天流水：自己说的话也落盘，不然翻记录时只有对方在自言自语
+    if (config.chatLog !== false) {
+      const myId = manager.selfId || config.selfId || ''
+      const who = myId ? `${selfName}(${myId})` : selfName
+      appendChatLog(record.dir, { who, text }, logger).catch(() => {})
+    }
+  }
 
   async function send(record, text) {
     // 「这次不接话」：模型只输出 [SILENT] 就当作它选择潜水 —— 不发、不进历史、不报错。
@@ -356,22 +380,7 @@ const pin = createPin({ config, logger })
 
     // 自己发出去的话也要进历史：不然下一轮它看不见「我说过什么」，
     // 群里口吻相近的别的机器人一开口，就会当成自己说的去道歉、去撤回。
-    const said = trimmed
-    if (sentAny && said) {
-      const selfName = manager.selfName || '机器人'
-      const entry = historyLine(null, said, { isSelf: true, selfName })
-      pushHistory(record, entry, config.historyLimit)
-      record.recent.push(entry)
-      const recentKeep = Math.max(80, (Number(config.contextMemoryKeep) || 30) * 3)
-      if (record.recent.length > recentKeep) record.recent.splice(0, record.recent.length - recentKeep)
-
-      // 聊天流水：自己说的话也落盘，不然翻记录时只有对方在自言自语
-      if (config.chatLog !== false) {
-        const myId = manager.selfId || config.selfId || ''
-        const who = myId ? `${selfName}(${myId})` : selfName
-        appendChatLog(record.dir, { who, text: said }, logger).catch(() => {})
-      }
-    }
+    if (sentAny) noteSelfSaid(record, trimmed)
 
     // 发完了，取消「正在输入」
     if (!isGroup) {
@@ -440,7 +449,7 @@ const pin = createPin({ config, logger })
   bedtime.start()
 
   try {
-    registerTools(ctx, { client, manager, config, logger, pin })
+    registerTools(ctx, { client, manager, config, logger, pin, wake, noteSelfSaid })
   } catch (err) {
     logger.warn('QQ 互动工具注册失败（聊天本身不受影响）:', err?.message ?? err)
   }

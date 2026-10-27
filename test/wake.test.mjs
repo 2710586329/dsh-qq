@@ -165,15 +165,20 @@ function makeConfig(over = {}) {
 }
 
 // 4c) 真发出去才算用掉一次
+//    ⭐ 2026-10-26 夜修：原来用 `Date.now() + 31 分钟` 当第二个 tick，过了午夜就跨天，
+//    配额按「天」记会被重置，测试在 23:30 之后跑必挂（不是插件的错，是测试自己撞了半夜）。
+//    改成固定基准 14:00，跟真实时钟无关。
 {
+  const base = new Date(2026, 9, 26, 14, 0)
   const r = fakeRecord('说过的', 60 * 60 * 1000)
+  r.lastActive = base.getTime() - 60 * 60 * 1000
   const m = fakeManager([r])
   const w = createWake({ config: makeConfig({ proactiveMaxPerDay: 1 }), manager: m, logger: {} })
   w.start()
-  w.tick()
+  w.tick(base)
   await new Promise((r2) => setTimeout(r2, 10))
   w.noteProactiveDelivered(r) // 真发了一句
-  w.tick(new Date(Date.now() + 31 * 60_000))
+  w.tick(new Date(base.getTime() + 31 * 60_000))
   await new Promise((r2) => setTimeout(r2, 10))
   check('说过一次后配额就满了', m.fired, ['说过的'])
   w.stop()

@@ -1,6 +1,9 @@
+import { join } from 'node:path'
 import { deriveSessionId, sessionKey } from './shared/session-id.js'
 import { ensurePeerWorkspace, resolvePeerWorkspace } from './workspace.js'
 import { loadHandoffFor } from './settings.js'
+import { createInjectState } from './inject-state.js'
+import { createSessionState } from './session-state.js'
 
 /**
  * 一个 QQ 会话（私聊 or 群）对应一个 DSH Agent。
@@ -21,12 +24,17 @@ export class SessionManager {
   #ready = new Map() // 已铺好的会话目录（避免每次 attach 都 mkdir）
   #sweeper = null
 
-  constructor({ agents, selfId, config, logger }) {
+  constructor({ agents, selfId, config, logger, home = '' }) {
     this.agents = agents
     this.selfId = selfId
     this.config = config
     this.logger = logger
     this.closed = false
+    // 「这个会话已经注入过聊天规矩」的账本：落盘，宿主重启/回收后别再注一遍。
+    this.injectState = createInjectState(home ? join(String(home), 'inject-state.json') : '', logger)
+    // 「reset 到第几代 / 这一代落在哪个 sessionId」的账本：也落盘。
+    // 不落盘的后果见 session-state.js 顶上那段 —— 重启即退回 reset 前的老会话 + 每次多一个空壳。
+    this.sessionState = createSessionState(home ? join(String(home), 'session-state.json') : '', logger)
     /** 回收前的保留判断（由 sleep 模块注入）：返回 true 就不回收。 */
     this.keeper = null
   }
@@ -106,7 +114,10 @@ export class SessionManager {
     const baseKey = this.#baseKey(current.scope, current.peerId)
     // ⭐ 2026-10-25：换会话时把「交接」留给下一代（姐姐/NapCat 触发 /reset 时也能接上话）。
     if (Array.isArray(seed) && seed.length > 0) this.#seedByKey.set(baseKey, seed)
-    this.#gens.set(baseKey, (this.#gens.get(baseKey) ?? 0) + 1)
+    // 代数读内存优先、盘兜底：宿主重启后内存空了，靠盘记住「已经 reset 过一次」
+    const next = (this.#gens.get(baseKey) ?? this.sessionState.gen(baseKey)) + 1
+    this.#gens.set(baseKey, next)
+    this.sessionState.setGen(baseKey, next)
     if (current.owned && current.dispose) {
       try {
         Promise.resolve(current.dispose()).catch(() => {})
@@ -116,15 +127,28 @@ export class SessionManager {
     }
     this.#records.delete(current.sessionId)
     if (this.#byPeer.get(current.key) === current.sessionId) this.#byPeer.delete(current.key)
+    // 上一代那笔账划掉：reset 之后是全新的 sessionId，老 sessions 记录也不会再用上
+    this.injectState.forget(current.sessionId)
+    this.sessionState.forgetSession(current.key)
     this.logger.info?.(`[dsh-qq] 重置会话 ${current.label}（gen → ${this.#gens.get(baseKey) ?? 0}）`)
     return true
+  }
+
+  /**
+   * 本会话第一轮投递把聊天规矩注完了 —— 记到盘上。
+   * 以后宿主重启、会话被回收后再回来，都不会再往历史里重复塞一遍人设。
+   */
+  markChatPromptInjected(record) {
+    if (!record) return
+    record.chatPromptInjected = true
+    this.injectState.mark(record.sessionId)
   }
 
   /** 按 scope + peerId 拿一个可用的会话记录，必要时新建。 */
   async obtain({ scope, peerId, label }) {
     if (this.closed) throw new Error('dsh-qq 已停止')
     const baseKey = this.#baseKey(scope, peerId)
-    const gen = this.#gens.get(baseKey) ?? 0
+    const gen = this.#gens.get(baseKey) ?? this.sessionState.gen(baseKey)
     // 第 0 代用原来的 key（保持跟已有历史对齐），之后每 /reset 一次换一个 key
     const key = gen > 0 ? `${baseKey}#${gen}` : baseKey
 
@@ -138,7 +162,10 @@ export class SessionManager {
       this.#byPeer.delete(key)
     }
 
-    const sessionId = deriveSessionId(key)
+    // ⭐ 2026-10-26：先看账本里这一代真正用的 id（换壳兜底过就跟 hash 推出来的不一样），
+    // 没有再退回 hash。只用 hash 的话，重启后永远找不着正在聊的那个壳，只会再开一个空的。
+    const derived = deriveSessionId(key)
+    const sessionId = this.sessionState.sessionId(key) || derived
     const cached = this.#records.get(sessionId)
     if (cached) {
       cached.lastActive = Date.now()
@@ -148,6 +175,8 @@ export class SessionManager {
     const attached = await this.#attach(sessionId, { scope, peerId, label })
     // #attach 可能换了 id（磁盘上留了恢复不出来的空壳会话时），以它实际用的为准
     const actualId = attached.sessionId ?? sessionId
+    // 换过壳就记下：下一次重启直接接回这个壳，不再傻乎乎去找那个恢复不了的老 id
+    if (actualId !== derived) this.sessionState.setSessionId(key, actualId)
     const record = {
       sessionId: actualId,
       key,
@@ -169,7 +198,10 @@ export class SessionManager {
       // ——不然新会话永远是个空壳，把交接卡漏掉（今晚就是这么漏的）。
       swapSeed: this.#seedByKey.get(baseKey)
         ?? ((gen > 0 || actualId !== sessionId) ? loadHandoffFor({ dir: attached.cwd }) || null : null),
-      chatPromptInjected: false,
+      // ⭐ 2026-10-26 姐姐说「不能每次都发那么长一截」：注入标记落盘了。
+      // 重启/回收后 record 重建，这里能读到「这个会话真的注过」→ 不再重复注入人设那一大坨。
+      // 按 sessionId 查（不是 key）：key 会因换代变，历史却是跟着 sessionId 走的。
+      chatPromptInjected: this.injectState.has(actualId),
     }
     this.#seedByKey.delete(baseKey)
     this.#records.set(actualId, record)

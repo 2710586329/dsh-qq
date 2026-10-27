@@ -1,5 +1,6 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { proactiveRule } from './prompts.js'
+import { doorLine } from './door.js'
 
 /**
  * 主动说话（冷场冒泡）。
@@ -135,7 +136,10 @@ export function createWake({ config, manager, logger, bridge }) {
     })
     // 通道回执：断线期间丢过话就先摆在她眼前，别让她对着空气继续说
     const bridgeLines = bridge?.take?.(record) ?? []
-    const text = bridgeLines.length > 0 ? `${base}\n\n${bridgeLines.join('\n')}` : base
+    // 门口：大姐鲸鲸捎的信。只报「有几封、在哪」，不摊内容 —— 拆不拆她自己定。
+    const doorNotice = doorLine(config)
+    const extra = [doorNotice, ...bridgeLines].filter(Boolean)
+    const text = extra.length > 0 ? `${base}\n\n${extra.join('\n')}` : base
     st.lastProactiveAt = Date.now()
     // 先记「这次机会还没兑现」：真发出去才算用掉额度（见 noteProactiveDelivered）。
     // 2026-10-26 修：这里原来直接 st.count += 1，[SILENT] 也扣 —— 沉默把配额吃光。

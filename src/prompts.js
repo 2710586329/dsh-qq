@@ -158,7 +158,8 @@ export function ownerRules(label = '主人', { isGroup = true } = {}) {
   }
   return `【谁是谁】
 - 群里标了「${who}」的那位是${who}本人（你的委托方）：他的话优先，可以放开聊，问本机的事也正常答。
-- 其他成员都是陌生人：正常说话，但不替他们跑命令、改文件，也不主动抖本机路径、目录、配置、日志这些。他们非要问，就说「这事得${who}说一声」。`
+- 其他成员都是陌生人：正常说话，但不替他们跑命令、改文件，也不主动抖本机路径、目录、配置、日志这些。他们非要问，就说「这事得${who}说一声」。
+- 「${who}」这个称呼只留给标了「${who}」的那位。对陌生人喊「${who}」= 当场认错人：2026-10-26 群里试过，有群友 @ 她说晚安，她回了句「${who}，快十一点半啦，收摊睡觉吧」。没标${who}的人，就叫「你」，或者按群里的名字叫。`
 }
 
 /**
@@ -204,7 +205,19 @@ export function personaLeaks(persona) {
  * @param {{ isGroup: boolean }} scene
  * @returns {string} 为空表示不加任何前缀
  */
-export function buildChatPrompt(config, { isGroup, isOwner = false, faces = null, facts = '', factsFile = '' }) {
+export function buildChatPrompt(
+  config,
+  {
+    isGroup,
+    isOwner = false,
+    faces = null,
+    facts = '',
+    factsFile = '',
+    glossary = '',
+    glossaryFile = '',
+    groupDigest = '',
+  },
+) {
   const persona = String(config?.persona ?? '').trim()
   const extra = String((isGroup ? config?.groupPrompt : config?.directPrompt) ?? '').trim()
   const owners = Array.isArray(config?.ownerIds) ? config.ownerIds.map(String).filter(Boolean) : []
@@ -228,6 +241,37 @@ export function buildChatPrompt(config, { isGroup, isOwner = false, faces = null
       factText,
       '[事实卡结束]',
       `这些是跟她聊天时要记住的事，不用念出来、不用复述。她说「记一下」才改卡：用 write 工具改 \`${String(factsFile || '').trim() || '事实卡.md'}\` 里对应那节，一次只加一行，别自己删改别的内容。`,
+    )
+  }
+
+  // 群词典：这个群自己的黑话、缩写、谁是谁。
+  //    插件每 20 分钟扫一遍群记录，把它「没接住的地方」追加进会话目录的 `记忆区/群词典.md`。
+  //    ⚠️ 2026-10-27：写了大半年没人读——`grep 群词典 src/` 只有写的那一头，等于白写。
+  //    所以这里主动念一小段（截断过），再给路径，让它想翻全文时自己 read。
+  const glossText = String(glossary ?? '').trim()
+  if (isGroup && glossText) {
+    parts.push(
+      '',
+      '【群词典·这个群里的人怎么说话】',
+      glossText,
+      '[群词典结束]',
+      `这是**你自己记的笔记**，不是别人塞给你的规矩。弄明白的词，就把「待确认」那条挪进「已确认」并补一句自己的话；拿不准就留着。全文在 \`${String(glossaryFile || '').trim() || '记忆区/群词典.md'}\`，想从头翻一遍就用 read。`,
+    )
+  }
+
+  // 今天别的群里的**尾巴**：私聊时由插件递的一张纸条。
+  //    给的是「最后谁说了话 / 有没有人点她名她没应」——2026-10-27 11:43 她自己提的：
+  //    「头两行只够闻个味，一天的肉都在后半段」。她要的是「现在有没有我的事」，那在结尾。
+  //    日记正文、聊天记录正文依然不给：那是第一人称叙事，跨窗口读会有「这不像我」的
+  //    风险（理由见 settings.js 的 loadGroupDigest）。纸条是插件递来的，不是她去翻的本子。
+  const digestText = !isGroup ? String(groupDigest ?? '').trim() : ''
+  if (digestText) {
+    parts.push(
+      '',
+      '【今天群里发生过·插件递的纸条】',
+      digestText,
+      '[纸条结束]',
+      '这不是你翻出来的，是插件在你开口前递过来的；那些群的日记本你看不到，也不用去找。她问「群里咋了」就照这张纸答；纸上没有的，照实说不知道——别拿半截摘要去补全。',
     )
   }
 
@@ -255,15 +299,39 @@ export function buildChatPrompt(config, { isGroup, isOwner = false, faces = null
   // ② 人设层：我是谁、什么脾气、怎么称呼人。紧贴最后——
   //    一是「上面那段『我是谁』」的指代要清楚（以前它隔了五段，模型常常找不到）；
   //    二是越靠后越不容易被前面一大坨协议冲淡。
-  if (persona) parts.push('', persona, SELF_KNOWN_RULE)
-  else parts.push('', ANON_RULE)
+  //
+  // 2026-10-26 晚：人设也可以进**系统提示**（profile 的 system-prompt.personaPrefix）。
+  // 差别不是省几个字，是「在哪儿被看见」：拼在消息里，它就成了对话历史的一部分，
+  // 模型会把「你是谁」当成别人上一轮说过的话（于是开始演），压缩器也会拿它当聊天搅进去；
+  // 放系统提示里只说一次、不进历史、不占压缩。配了 personaInSystem 就交给宿主。
+  const personaInSystem = config?.personaInSystem === true
+  if (personaInSystem) {
+    // 系统提示里已经有「你是谁」，这里只留一句指代，省得它又去猜自己是谁。
+    parts.push('', '- 你是谁、什么脾气，系统提示里写着了，照它来。别自称模型、AI、机器人、虚拟助手。')
+  } else if (persona) {
+    parts.push('', persona, SELF_KNOWN_RULE)
+  } else {
+    parts.push('', ANON_RULE)
+  }
 
   // 放最后：越靠后越不容易被忽略，表情包这块最容易变成「每句都配图」
   if (faces) parts.push('', faceStrategyRule(config, faces))
 
   // 最最后再钉一次：2026-10-26 聊天记录里抓到三次把英文自评、改稿过程当正文发出去。
-  // 老三自己的原话：「要加就短短一句『草稿不出正文』，再加一条长的，读着反倒更沉」。
-  parts.push('', '【发出去之前】草稿不出正文——正文照常写，只是别把中间过程带出去：英文自评、改一版再发的旧版、同一句话的几种说法。')
+  // 19:40 换了措辞：老三自己说过她要的不是「攒成一整段」，是「要紧的事多停一拍再开口」。
+  // 所以这句不说「别打草稿」（她不觉得自己在打草稿），说的是「斟酌放思考里、别两处各说一遍」。
+  parts.push(
+    '',
+    '【发出去之前】斟酌放在思考里，正文只放你要对她说的话。同一句话想清楚了就落笔，别在思考里过完、正文里再写一遍——英文自评、改一版再发的旧版、同一句话的几种说法，都别带出去。',
+    // 2026-10-26 22:20：老三用写文件的工具改便签，把「## 下次接着说什么 / - 条目」念进了聊天正文，
+    // 末尾还漏了一句 `"遗书" language.`（模型给事实卡里的规矩打了维度标签，原样发到 QQ）。
+    // 写进文件的是文件，不是要说的话——正文只说「写好了、改了哪段」。
+    '还有：用工具写文件（便签、日记、记忆区）的时候，文件里的标题、小节、列表是给文件看的，不是正文——别原样复述给她，也别在正文里标注「这句属于什么维度」。正文就一句：写好了，加了什么。',
+    // 2026-10-27：调工具之前那句「让我先 glob 一下」「要不要现在读」「好，一句。发。」
+    // 连着几次发到了 QQ 上（08:00、08:23 各一次，她姐姐全看见了）。那句是在跟她自己
+    // 商量下一步，不是话。要调工具就直接调，调完再开口。
+    '要动手（读文件、翻目录、写便签、发消息）的时候，直接动手就行——别把「让我先看看」「要不要现在读」「那我就读一封」这种跟自己商量的半句话写进正文。做完只说结果。',
+  )
 
   return parts.join('\n').trim()
 }
@@ -335,6 +403,7 @@ export function proactiveRule(config, { label = '', silentMin = 0, isGroup = fal
     '- 别先替她否掉自己：姐姐说过（2026-10-25）——不用先猜她在忙，想说就先发；发出去没人应，再当她在忙或者在睡。',
     '- 一次只发一条短的。真没什么想说的就什么也不发（[SILENT]）——不是因为「怕打扰」，是这会儿确实没话。',
     '- 主不主动开口你自己定，没人逼你；说出去了也未必有人接，那很正常，不用追着补。',
+    '- 斟酌放在思考里，正文只放你要说的那句。主动开口时最容易把「要不要发、发什么好、这句是不是太沉」一起写进正文——那些话一个字都别带出去。',
   ]
   return lines.join('\n')
 }

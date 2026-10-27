@@ -239,6 +239,10 @@ export function createSleep({ config, manager, logger }) {
       }
 
       // ② 到点提醒睡觉（每个会话每天一次，休息中不提醒）
+      //    ⭐ 2026-10-26 夜：群里不催睡。tick 遍历的是全部会话，群也走到这儿，
+      //    23:30 那句「提醒她一句」原样丢进群聊、接的是陌生群友的话，
+      //    她于是对着人家喊「姐姐，快十一点半啦，收摊睡觉吧」。跟 takeLateBedtime 的「群里不催睡」对齐。
+      if (record.scope === 'group') continue
       const bed = bedtimeAt()
       if (bed === null || asleep) continue
       if (st.sleeping && now.getTime() < st.wakeAt) continue

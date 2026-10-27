@@ -59,6 +59,17 @@ t('没配人设才用 ANON_RULE，且不出现 SELF_KNOWN_RULE', () => {
   assert.ok(!p.includes(SELF_KNOWN_RULE))
 })
 
+// 2026-10-26 晚：人设可以交给宿主的系统提示（profile 的 personaPrefix）。
+// 那时候消息里就不能再有一份——否则对话历史里又冒出「你是谁」，
+// 模型会把它当成别人上一轮说过的话。
+t('personaInSystem：人设在系统提示里时，消息里不再重复一份', () => {
+  const p = buildChatPrompt({ persona: PERSONA, personaInSystem: true }, { isGroup: false })
+  assert.ok(!p.includes(PERSONA), '人设不该再拼进消息')
+  assert.ok(p.includes('系统提示里写着了'), '要留一句指代，别让它去猜自己是谁')
+  assert.ok(!p.includes(ANON_RULE), '有系统级人设就不该走「没有固定名字」那条')
+  assert.ok(!p.includes(SELF_KNOWN_RULE), 'SELF_KNOWN_RULE 说的是「上面那段」，这里上面没有人设')
+})
+
 t('事实卡在人设之前（事在协议后面、性格前面）', () => {
   const p = buildChatPrompt(
     { persona: PERSONA },

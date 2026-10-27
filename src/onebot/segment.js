@@ -76,6 +76,32 @@ function toSegments(message) {
 }
 
 /**
+ * 合并转发的 id 是从桥接那头传回来的，不能当可信输入直接塞进 RPC。
+ *
+ * 只放行一路字符、长度卡死 256（跟前辈 qq-bridge 的 `sanitizeForwardId` 一个口径）。
+ */
+export function sanitizeForwardId(raw) {
+  const s = String(raw ?? '').trim()
+  if (!s || s.length > 256) return ''
+  return /^[\w:.\-/=+@]+$/.test(s) ? s : ''
+}
+
+/**
+ * 各家桥接给的转发 id 字段名不一样：`id` / `res_id` / `file_id` / `forward_id`。
+ * 挨个试，第一个过了消毒的就算。
+ */
+export function forwardIdFromData(data) {
+  if (!data || typeof data !== 'object') return ''
+  for (const key of ['id', 'res_id', 'file_id', 'forward_id']) {
+    const v = data[key]
+    if (v === undefined || v === null || v === '') continue
+    const ok = sanitizeForwardId(v)
+    if (ok) return ok
+  }
+  return ''
+}
+
+/**
  * 把入站消息读成「给人看的一句话 + 结构信息」。
  *
  * @param {unknown} message   OneBot 原始 message 字段
@@ -95,6 +121,9 @@ export function readMessage(message, { selfId, selfName = '' } = {}) {
   let atAll = false
   let replyId = null
   let poke = false
+  // 合并转发：段里只有个 id，内容得另外调 get_forward_msg 取。
+  // 这个函数是同步的，取不了网络，所以只把 id 交出去，由 inbound 那边补。
+  const forwards = []
 
   for (const seg of segments) {
     const type = seg?.type
@@ -154,6 +183,7 @@ export function readMessage(message, { selfId, selfName = '' } = {}) {
         replyId = data.id === undefined ? null : String(data.id)
         break
       case 'forward':
+        forwards.push({ id: forwardIdFromData(data) })
         text += '[合并转发]'
         break
       case 'json':
@@ -196,6 +226,7 @@ export function readMessage(message, { selfId, selfName = '' } = {}) {
     atAll,
     replyId,
     poke,
+    forwards,
   }
 }
 

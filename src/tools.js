@@ -9,11 +9,14 @@
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 
 import { pickFace, keepFace, facesCount, faceSendState, markFaceSent, listFaces } from './faces.js'
-import { appendFact } from './settings.js'
+import { appendFact, upsertGlossaryTerm } from './settings.js'
 import { auditOutbound } from './audit.js'
+import { lookupMeme } from './meme.js'
+import { downloadImage } from './inbound.js'
 
 /**
  * 工具直接发出去的文字也要过审计。
@@ -38,6 +41,13 @@ const REACT_DESC =
   '给当前对话里最新的一条消息贴上表情回应（QQ 的「表情表态」）。' +
   '表情 id 用 QQ 表情的数字编号，比如 1 是微笑、4 是得意、14 是白眼、178 是捂脸、' +
   '212 是裂开、264 是流泪。想表达态度又不想刷屏时用它。'
+
+const IMAGES_DESC =
+  '把某条 QQ 消息里的图片重新取回来看（按消息 id）。' +
+  '消息正文里只会出现一个 `[图片]` 占位——那一刻没被叫醒、或者当时没顾上看，' +
+  '事后用这个工具还能把那张图捞回来。' +
+  '聊天流水里每行末尾有 `#msg=123456`，那就是这条消息的 id；不填 id 就是最近收到的这一条。' +
+  '拿回来的是本机文件路径，接着用 read_image 打开就能看见。一次最多四张。'
 
 const LIKE_DESC =
   '给对方的 QQ 名片点赞（就是资料页的那个赞）。每天每人最多 10 次，' +
@@ -78,11 +88,28 @@ function peerOf(record) {
     : { user_id: Number(record.peerId) }
 }
 
-export function registerTools(ctx, { client, manager, config, logger, pin }) {
+export function registerTools(ctx, { client, manager, config, logger, pin, wake, noteSelfSaid }) {
   const tools = ctx.get?.('tools')
   if (!tools?.register) {
     logger.info?.('tools 服务不可用，QQ 互动工具未注册（聊天本身不受影响）')
     return
+  }
+
+  /**
+   * 工具发出去的东西也要记账（2026-10-27 姐姐让修的）。
+   *
+   * 以前只有正文走 send() 才写流水、进 history，用 qq_send / qq_reply 说的话等于「发出去就没了」：
+   * 翻聊天记录缺一句，下一轮她自己也不知道自己说过。这里补上，顺带兑现主动开口的额度。
+   */
+  function noteToolSent(record, text) {
+    const said = String(text ?? '').trim()
+    if (!said) return
+    try {
+      wake?.noteProactiveDelivered?.(record)
+      noteSelfSaid?.(record, said)
+    } catch (err) {
+      logger?.debug?.(`工具外发记账失败：${err?.message ?? err}`)
+    }
   }
 
   tools.register({
@@ -128,6 +155,104 @@ export function registerTools(ctx, { client, manager, config, logger, pin }) {
       } catch (err) {
         logger.warn?.(`qq_facts 写入失败: ${err?.message ?? err}`)
         return { ok: false, file, text: String(args?.text ?? '') }
+      }
+    },
+  })
+
+  tools.register({
+    name: 'qq_glossary',
+    description:
+      '往某个群的群词典里补一条「弄明白了的说法」。群里的黑话、缩写、谁是谁——弄懂了就记下来，下回不用重新问。' +
+      '传群号就行，不用传路径：这只笔只有一个落点，写的就是那个群的 `记忆区/群词典.md`，别的地方写不了。' +
+      '「待确认」里通常正等着你；填完这条，对上的那条待确认会自动清掉。',
+    parameters: {
+      type: 'object',
+      properties: {
+        group: { type: 'string', description: '群号（纯数字），比如 580579694' },
+        word: { type: 'string', description: '那个词 / 说法本身' },
+        meaning: { type: 'string', description: '它的意思（一句话，用自己的话，别抄别人）' },
+        who: { type: 'string', description: '从谁那儿听来的（可空）' },
+      },
+      required: ['group', 'word', 'meaning'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: { ok: { type: 'boolean' }, file: { type: 'string' }, message: { type: 'string' } },
+        required: ['ok'],
+        additionalProperties: false,
+      },
+      render: (_args, value) => [
+        { type: 'text', text: value.ok ? `群词典已记下：${value.message}` : `没写成：${value.message}` },
+      ],
+    },
+    async execute(args) {
+      try {
+        const { file } = upsertGlossaryTerm({
+          workspaceRoot: String(config?.workspaceRoot ?? '').trim(),
+          group: args?.group,
+          word: args?.word,
+          meaning: args?.meaning,
+          who: args?.who,
+        })
+        return { ok: true, file, message: String(args?.word ?? '').trim() }
+      } catch (err) {
+        logger.warn?.(`qq_glossary 写入失败: ${err?.message ?? err}`)
+        return { ok: false, file: '', message: String(err?.message ?? err) }
+      }
+    },
+  })
+
+  tools.register({
+    name: 'qq_meme',
+    description:
+      '查一个网络梗 / 黑话 / 缩写的出处和用法。手边有一份 6668 条的梗词库快照（cnmeme.wiki，2026-10-26 建库），毫秒级。' +
+      '看到不认识的词先查一次，别硬猜、别编出处；查到之后**先接梗、别科普**——照着「怎么用」随口用一句，只有对方明确问「这是什么梗」才讲一两句。' +
+      '⚠️ 它只收网上的通用梗：群里的自造说法（「已取餐」这类）查不到，那些用 qq_glossary 记下来。查不到就说不认识。',
+    parameters: {
+      type: 'object',
+      properties: {
+        word: { type: 'string', description: '那个词本身（不用带标点；叠词像「杂鱼杂鱼」会自动折叠）' },
+        full: { type: 'boolean', description: '要完整原文传 true；默认截断到 600 字，平常不用' },
+      },
+      required: ['word'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          found: { type: 'boolean' },
+          title: { type: 'string' },
+          text: { type: 'string' },
+          message: { type: 'string' },
+        },
+        required: ['found'],
+        additionalProperties: false,
+      },
+      render: (_args, value) => [
+        { type: 'text', text: value.found ? value.text : value.message || '（词库里没有这个词）' },
+      ],
+    },
+    async execute(args) {
+      try {
+        const word = String(args?.word ?? '').trim()
+        const r = await lookupMeme(word, { full: Boolean(args?.full) })
+        if (!r.found) {
+          return {
+            found: false,
+            title: '',
+            text: '',
+            message:
+              `词库里没有「${word}」。它是网络通用梗的快照，群里的自造说法它没有 —— ` +
+              '直接说不认识，别猜，也别把两个不相干的梗拼一起。',
+          }
+        }
+        return { found: true, title: r.title, text: r.text, message: '' }
+      } catch (err) {
+        logger.warn?.(`qq_meme 查询失败: ${err?.message ?? err}`)
+        return { found: false, title: '', text: '', message: `查不了：${err?.message ?? err}` }
       }
     },
   })
@@ -279,6 +404,93 @@ export function registerTools(ctx, { client, manager, config, logger, pin }) {
   })
 
   tools.register({
+    name: 'qq_images',
+    description: IMAGES_DESC,
+    parameters: {
+      type: 'object',
+      properties: {
+        message_id: {
+          type: 'integer',
+          description: '可选：要看哪条消息里的图（流水里 `#msg=` 后面那串）。不填就是最近收到的这一条。',
+        },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          messageId: { type: 'integer' },
+          paths: { type: 'array', items: { type: 'string' } },
+          message: { type: 'string' },
+        },
+        required: ['ok', 'messageId', 'paths', 'message'],
+        additionalProperties: false,
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text: value.paths.length
+            ? `${value.message}：\n${value.paths.map((p) => `  ${p}`).join('\n')}\n（用 read_image 打开）`
+            : value.message,
+        },
+      ],
+    },
+    async execute(args, exec) {
+      const record = needRecord(manager, exec)
+      const messageId = Number(args?.message_id ?? record.lastMessageId ?? 0)
+      if (!Number.isFinite(messageId) || messageId <= 0) {
+        throw new Error('qq_images: 不知道要看哪条消息')
+      }
+
+      let data
+      try {
+        data = await client.call('get_msg', { message_id: messageId })
+      } catch (err) {
+        logger.warn?.(`qq_images 取消息失败: ${err?.message ?? err}`)
+        return { ok: false, messageId, paths: [], message: `取不到这条消息：${err?.message ?? err}` }
+      }
+
+      const segs = Array.isArray(data?.message)
+        ? data.message
+        : Array.isArray(data?.data?.message)
+          ? data.data.message
+          : []
+      const urls = []
+      for (const seg of segs) {
+        if (seg?.type !== 'image') continue
+        const d = seg.data ?? {}
+        const src = String(d.url ?? '') || String(d.file ?? '') || String(d.path ?? '')
+        if (src) urls.push(src)
+        if (urls.length >= 4) break
+      }
+      if (urls.length === 0) {
+        return {
+          ok: true,
+          messageId,
+          paths: [],
+          message: '这条消息里没有图片（表情包和合并转发里的图不算在这一条里）',
+        }
+      }
+
+      const cacheDir = record.dir
+        ? join(record.dir, '图片缓存')
+        : join(String(config?.cwd ?? '').trim() || process.cwd(), '图片缓存')
+      await mkdir(cacheDir, { recursive: true }).catch(() => {})
+      const maxMB = Number(config?.imageMaxMB) || 8
+      const paths = (
+        await Promise.all(urls.map((u) => downloadImage(u, cacheDir, maxMB)))
+      ).filter(Boolean)
+
+      if (paths.length === 0) {
+        return { ok: false, messageId, paths: [], message: '图找到了但拿不下来（链接可能过期了）' }
+      }
+      return { ok: true, messageId, paths, message: `拿到 ${paths.length} 张图` }
+    },
+  })
+
+  tools.register({
     name: 'qq_like',
     description: LIKE_DESC,
     parameters: {
@@ -356,6 +568,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin }) {
           message: [{ type: 'image', data: { file } }],
         })
         markFaceSent()
+        noteToolSent(record, '[图片]')
         return { ok: true, target: record.label }
       } catch (err) {
         logger.warn?.(`qq_send_image 失败: ${err?.message ?? err}`)
@@ -396,6 +609,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin }) {
           ...peerOf(record),
           message: [{ type: 'face', data: { id } }],
         })
+        noteToolSent(record, `[表情 ${id}]`)
         return { ok: true, id }
       } catch (err) {
         logger.warn?.(`qq_face 失败: ${err?.message ?? err}`)
@@ -446,6 +660,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin }) {
             name,
           })
         }
+        noteToolSent(record, `[文件] ${name}`)
         return { ok: true, target: record.label }
       } catch (err) {
         logger.warn?.(`qq_send_file 失败: ${err?.message ?? err}`)
@@ -541,6 +756,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin }) {
         const result = await client.call(action, { ...target, message: segments })
         const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
         if (sentId > 0) record.lastSentMessageId = sentId
+        noteToolSent(record, text)
         return { ok: true, messageId: sentId, quoted }
       } catch (err) {
         logger.warn?.(`qq_reply 失败: ${err?.message ?? err}`)
@@ -611,6 +827,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin }) {
         })
         const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
         if (sentId > 0) record.lastSentMessageId = sentId
+        noteToolSent(record, text)
         return { ok: true, messageId: sentId, target: targetLabel }
       } catch (err) {
         logger.warn?.(`qq_send 失败: ${err?.message ?? err}`)
@@ -811,6 +1028,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin }) {
           if (sentId > 0) {
             record.lastSentMessageId = sentId
             markFaceSent()
+            noteToolSent(record, `[表情包] ${face.summary || '图片'}`)
             return { ok: true, mode: 'image', messageId: sentId, reason: face.summary || '' }
           }
         } catch (err) {
@@ -838,6 +1056,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin }) {
         if (sentId > 0) {
           record.lastSentMessageId = sentId
           markFaceSent()
+          noteToolSent(record, `[表情包] ${summary}`)
           return { ok: true, mode: 'mface', messageId: sentId }
         }
       } catch (err) {
@@ -856,6 +1075,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin }) {
           if (sentId > 0) {
             record.lastSentMessageId = sentId
             markFaceSent()
+            noteToolSent(record, `[表情包] ${summary}`)
             return { ok: true, mode: 'cdn', messageId: sentId }
           }
         } catch (err) {
