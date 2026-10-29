@@ -20,15 +20,24 @@ const REAL_REASONING_1716 = [
 ]
 
 function makeHarness({ sent = [] } = {}) {
-  const manager = { find: (id) => (id === 's1' ? { scope: 'private', sessionId: id } : undefined) }
+  // 2026-10-28：以前每次 find 都返回新对象，于是「主动机会」的戳（record._proactiveAt）
+  // 设置方和读取方拿到的不是同一个东西。真实 manager 存的是同一条记录，这里也照做。
+  const record = { scope: 'private', sessionId: 's1' }
+  const manager = { find: (id) => (id === 's1' ? record : undefined) }
   const config = { streamReply: false, streamMaxChunks: 0 }
   const logger = { info() {}, warn() {}, debug() {} }
-  const wake = { noteOutbound() {} }
+  const silent = { count: 0 }
+  const wake = {
+    noteOutbound() {},
+    noteProactiveSilent() {
+      silent.count += 1
+    },
+  }
   const onSessionEvent = createOutbound({
     manager,
     config,
     logger,
-    send: async (record, text) => {
+    send: async (rec, text) => {
       sent.push(text)
     },
     wake,
@@ -40,7 +49,12 @@ function makeHarness({ sent = [] } = {}) {
     )
   const tool = (name) =>
     onSessionEvent({ id: 's1' }, { type: 'tool/call', sessionId: 's1', data: { name } })
-  return { fire, sent, tool }
+  const turnEnd = () =>
+    onSessionEvent(
+      { id: 's1' },
+      { type: 'turn/end', sessionId: 's1', data: { reason: { kind: 'completed' } } },
+    )
+  return { fire, sent, tool, record, turnEnd, silent }
 }
 
 test('extractText 只认 text 块——纯 reasoning 拿到空串', () => {
@@ -431,5 +445,88 @@ test('正文整条都是收尾话时，一个字都不发', async () => {
   const { fire, sent } = makeHarness()
   await fire({ content: [{ type: 'text', text: '结束这轮，不再说话。' }] })
   assert.deepEqual(sent, [])
+})
+
+// ── 2026-10-28：主动机会那一轮，正文空就是她选择不说 ────────────────────
+// 08:30 / 09:00 / 09:48 三轮：正文空、reasoning 里写着「就沉默。规则说发出去没人应，
+// 当她在忙。别再发。」，兜底把心里话当正文播到了私聊。这里锁死：主动机会轮不兜底。
+
+test('主动机会这一轮正文空：不兜底 reasoning，按沉默处理（08:30 那条）', async () => {
+  const { fire, sent, record, silent } = makeHarness()
+  record._proactiveAt = Date.now()
+  await fire({
+    content: [{ type: 'reasoning', text: '就沉默。规则说发出去没人应，当她在忙。别再发。' }],
+  })
+  assert.deepEqual(sent, [], '心里话不该被当成话说出去')
+  assert.equal(silent.count, 1, '要按她选了沉默来处理，不扣主动额度')
+})
+
+test('主动机会这一轮写了正文：照发（08:00 看书那条）', async () => {
+  const { fire, sent, record } = makeHarness()
+  record._proactiveAt = Date.now()
+  await fire({ content: [{ type: 'text', text: '夜里醒了一回，就着台灯翻了两章书' }] })
+  assert.deepEqual(sent, ['夜里醒了一回，就着台灯翻了两章书'])
+})
+
+test('不是主动机会时，正文空仍照旧兜底（10-26 17:15 丢话那次）', async () => {
+  const { fire, sent } = makeHarness()
+  await fire({ content: [{ type: 'reasoning', text: '嗯，那就这样，我先去看看书。' }] })
+  assert.equal(sent.length, 1, '正常对话不能因为这条修复把话吞了')
+})
+
+test('turn/end 之后戳清掉，下一轮恢复正常兜底', async () => {
+  const { fire, sent, record, turnEnd } = makeHarness()
+  record._proactiveAt = Date.now()
+  turnEnd()
+  assert.equal(record._proactiveAt, 0)
+  await fire({ content: [{ type: 'reasoning', text: '嗯，那就这样，我先去看看书。' }] })
+  assert.equal(sent.length, 1)
+})
+
+// ── 2026-10-28 12:38：标记在，但心里话也写在正文里 ──────────────────────
+// 那轮正文 = 「21 分钟没动静，可能在午睡。别打扰。沉默。」 + [SILENT]。
+// stripLeakedThinking 先把 [SILENT]（没汉字）当「不是话」丢掉，剩下那句心里话
+// 反倒成了正文。这里锁死：正文里只要有标记，整条不发。
+
+test('12:38 事故：正文 = 心里话 + [SILENT]，一条都不许发出去', async () => {
+  const { fire, sent, record, silent } = makeHarness()
+  record._proactiveAt = Date.now() // 主动机会那一轮
+  await fire({
+    content: [{ type: 'text', text: '21 分钟没动静，可能在午睡。别打扰。沉默。\n[SILENT]' }],
+  })
+  assert.deepEqual(sent, [], '心里话被当成正文发了——就是 12:38 那次')
+  assert.equal(silent.count, 1, '主动机会的额度要还回去')
+})
+
+test('同一形状但不在主动轮：标记在，也整条不发', async () => {
+  const { fire, sent } = makeHarness()
+  await fire({ content: [{ type: 'text', text: '[SILENT]\n本姑娘不说话了' }] })
+  assert.deepEqual(sent, [])
+})
+
+test('正常说话（不带标记）不受影响', async () => {
+  const { fire, sent } = makeHarness()
+  await fire({ content: [{ type: 'text', text: '那本姑娘先去看看书，姐姐忙着。' }] })
+  assert.equal(sent.length, 1)
+})
+
+// ── 2026-10-28 13:09：连标记都没有，心里话直接写进正文 ──────────────────
+// 那天主动轮正文是「不过可以想到：她之前说困了眯一会儿。等她自己醒。沉默。」
+// 干净得像一句正文，于是原样发出去了。主动轮里凡是向自己交代的都当沉默。
+
+test('13:09 事故：主动轮正文是自我交代，一个字都不许发', async () => {
+  const { fire, sent, record, silent } = makeHarness()
+  record._proactiveAt = Date.now()
+  await fire({
+    content: [{ type: 'text', text: '不过可以想到：她之前说困了眯一会儿。等她自己醒。沉默。' }],
+  })
+  assert.deepEqual(sent, [], '心里话又被当正文发了')
+  assert.equal(silent.count, 1, '额度还回去')
+})
+
+test('不是主动轮时，带「沉默」的正常对话照发', async () => {
+  const { fire, sent } = makeHarness()
+  await fire({ content: [{ type: 'text', text: '姐姐要是想一个人待着，本姑娘就安静会儿。' }] })
+  assert.equal(sent.length, 1)
 })
 

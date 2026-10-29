@@ -141,6 +141,11 @@ export function createWake({ config, manager, logger, bridge }) {
     const extra = [doorNotice, ...bridgeLines].filter(Boolean)
     const text = extra.length > 0 ? `${base}\n\n${extra.join('\n')}` : base
     st.lastProactiveAt = Date.now()
+    // 2026-10-28：给这一轮盖个「主动机会」的戳。
+    // outbound 的 reasoning 兜底要认它 —— 主动机会正文空，就是她选择不说；
+    // 再拿 reasoning 尾段当正文，等于把心里话播出去
+    // （08:30「就沉默。规则说发出去没人应…」、09:00「…保持沉默。」、09:48 三轮都这么播的）。
+    record._proactiveAt = Date.now()
     // 先记「这次机会还没兑现」：真发出去才算用掉额度（见 noteProactiveDelivered）。
     // 2026-10-26 修：这里原来直接 st.count += 1，[SILENT] 也扣 —— 沉默把配额吃光。
     st.pending = Date.now()

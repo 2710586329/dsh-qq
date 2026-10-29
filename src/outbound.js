@@ -511,6 +511,25 @@ const SELF_SENDING_TOOLS = new Set([
   'qq_mface',
 ])
 
+/**
+ * 这一轮是不是「主动机会」（`wake.js` 的 `fire()` 投的 `【主动机会】`）。
+ *
+ * 2026-10-28 加。起因：08:30 / 09:00 / 09:48 三轮主动机会，正文是空的、
+ * reasoning 里写着「就沉默。规则说发出去没人应，当她在忙。别再发。」
+ * 之类的话，兜底把它们当正文播到了私聊里 —— 她心里盘算要不要开口，
+ * 结果被当成开口说了。
+ *
+ * 语义上要分开：
+ * - 别人来找她 → 正文空才要兜底（10-26 有两次人根本没收到话）；
+ * - 主动给她机会 → 正文空就是她选择不说，兜底等于逼她开口，还把心里话播出去。
+ *
+ * 10 分钟窗口兜底：万一某轮没收尾，标记不至于一直挂着。
+ */
+function inProactiveTurn(record) {
+  const at = Number(record?._proactiveAt || 0)
+  return at > 0 && Date.now() - at < 10 * 60_000
+}
+
 export function createOutbound({ manager, config, logger, send, wake }) {
   const lastSent = new Map() // sessionId -> 上一条完整文本（去重用）
   const streamBuf = new Map() // sessionId -> 还没发出去的流式尾巴
@@ -599,16 +618,49 @@ export function createOutbound({ manager, config, logger, send, wake }) {
         resetStream(sessionId)
         return
       }
-      let text = stripLeakedThinking(extractText(data.message))
+      // 2026-10-28 12:38 事故：主动机会那一轮，她的正文是「21 分钟没动静，可能在午睡。别打扰。沉默。」
+      // 后面跟着 [SILENT]。stripLeakedThinking 先看到了 [SILENT]——它一个汉字都没有，
+      // 被那句 `if (!HAS_CJK.test(t) && t.length >= 4) return ''` 当成「不是话」整行丢掉，
+      // 剩下那句心里话反倒被当成正文发了出去。标记的语义是「这句是跟我自己说的」，
+      // 只要它在，整条都不发——不看前后还写了什么，也不兜底、不扣额度。
+      const rawText = extractText(data.message)
+      if (rawText.includes(SILENT_MARKER)) {
+        logger.info?.(`[dsh-qq] ${record.label} 正文带 ${SILENT_MARKER}，整条按沉默处理（不兜底）`)
+        resetStream(sessionId)
+        wake?.noteProactiveSilent?.(record)
+        return
+      }
+      let text = stripLeakedThinking(rawText)
       // 2026-10-27 21:4x：正常正文也过一遍收尾元话。
       // 以前只有「正文为空、兜底捞 reasoning」那条路才剥，所以
       // 「结束这轮，不再说话。」这种宣告句直接从正文流出去了。
       text = stripClosingTalk(text)
+      // 2026-10-28 13:09 事故：主动机会那一轮，正文整句是
+      // 「不过可以想到：她之前说困了眯一会儿。等她自己醒。沉默。」
+      // 一个标记都没有，纯心里话写进了正文。主动轮本来就允许「不说」，
+      // 凡是正文在向自己交代（沉默/别打扰/等她自己醒）的，一律当沉默——
+      // 宁可少说一句，不许再漏一次。
+      if (inProactiveTurn(record) && /沉默|别打扰|等她(自己)?醒|不追着|别催/.test(text)) {
+        logger.info?.(`[dsh-qq] ${record.label} 主动机会这一轮正文是自我交代，按沉默处理`)
+        resetStream(sessionId)
+        wake?.noteProactiveSilent?.(record)
+        return
+      }
       // 模型偶尔把答案整个写进 reasoning，text 块是空的（2026-10-26 17:15、17:16 各一次：
       // turn 正常结束，QQ 那边一个字都没收到）。退回去取 reasoning 的尾段当正文。
       // 2026-10-27 09:42 起加护栏：带工具调用的消息不兜底（那是动手前的盘算，不是话）。
       // 2026-10-27 15:08 / 16:00 再加一层：兜底捞到的东西先过 stripMetaTalk，
       // 把「再加一点温度：不用太长。」这类改稿指令剥掉；剥空了就当这轮没话，不发。
+      // 2026-10-28：主动机会那一轮不兜底 —— 正文空就是她选择不说。
+      // 兜底的初衷是「怕丢话」，可主动机会本来就是「可以说，也可以不说」，
+      // 硬兜底等于逼她开口，还把「就沉默。规则说发出去没人应，当她在忙」这种
+      // 心里话当成话播了出去（08:30、09:00、09:48 三轮）。
+      if (!text && !hasToolUse(data.message) && inProactiveTurn(record)) {
+        logger.info?.(`[dsh-qq] ${record.label} 主动机会这一轮没写正文，按沉默处理（不兜底 reasoning）`)
+        resetStream(sessionId)
+        wake?.noteProactiveSilent?.(record)
+        return
+      }
       if (!text && !hasToolUse(data.message)) {
         const tailed = reasoningTail(data.message)
         if (tailed.includes(SILENT_MARKER)) {
@@ -658,6 +710,8 @@ export function createOutbound({ manager, config, logger, send, wake }) {
       lastSent.delete(sessionId)
       selfSent.delete(sessionId)
       resetStream(sessionId)
+      // 2026-10-28：主动机会的戳只在本轮有效，别让它跨轮残留
+      if (record._proactiveAt) record._proactiveAt = 0
       const reason = data.reason
       if (reason?.kind === 'error') {
         const message =
