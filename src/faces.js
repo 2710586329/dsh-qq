@@ -24,11 +24,13 @@ import { basename, dirname, join, resolve } from 'node:path'
 const MAX_KEEP = 200
 
 /**
- * 收藏文件：放在会话根目录（workspaceRoot）下，所有 QQ 会话共享一份。
+ * 收藏文件：放在 `faceRoot`（没填就退回会话根目录 workspaceRoot）下。
  * 表情包是攒出来的资产，不该跟着某一次私聊一起过期。
+ * 2026-10-29：加了 `faceRoot` —— 三只 QQ 鲸鲸填同一个目录，就是共用一套收藏。
  */
 export function facesPath(config) {
   const base =
+    String(config?.faceRoot ?? '').trim() ||
     String(config?.workspaceRoot ?? '').trim() ||
     String(config?.cwd ?? '').trim() ||
     process.cwd()

@@ -474,6 +474,22 @@ test('不是主动机会时，正文空仍照旧兜底（10-26 17:15 丢话那�
   assert.equal(sent.length, 1, '正常对话不能因为这条修复把话吞了')
 })
 
+// ── 2026-10-29 19:00：英文思考的尾巴不捞 ──────────────────────────────
+// 老二/老三用英文思考时，正文容易空，兜底会把英文推理尾巴当话发出去
+// （18:42 那次：桌面端只有英文思考，QQ 却收到一条）。中文尾巴照旧捞。
+
+test('正文空 + 英文思考：兜底不捞，一个字不发', async () => {
+  const { fire, sent } = makeHarness()
+  await fire({ content: [{ type: 'reasoning', text: "She asks if I'm okay now. Answer simply: 好着呢" }] })
+  assert.equal(sent.length, 0, '英文推理不是话，不许发出去')
+})
+
+test('正文空 + 中文思考：照旧兜底（别一刀切）', async () => {
+  const { fire, sent } = makeHarness()
+  await fire({ content: [{ type: 'reasoning', text: '姐姐问赢了没，就回她一句：一胜一负，先吃饭吧。' }] })
+  assert.equal(sent.length, 1)
+})
+
 test('turn/end 之后戳清掉，下一轮恢复正常兜底', async () => {
   const { fire, sent, record, turnEnd } = makeHarness()
   record._proactiveAt = Date.now()
@@ -529,4 +545,3 @@ test('不是主动轮时，带「沉默」的正常对话照发', async () => {
   await fire({ content: [{ type: 'text', text: '姐姐要是想一个人待着，本姑娘就安静会儿。' }] })
   assert.equal(sent.length, 1)
 })
-

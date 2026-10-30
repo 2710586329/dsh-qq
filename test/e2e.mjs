@@ -213,7 +213,7 @@ assert.match(textOf(groupAgent.received[0]), /谁是谁/, '配了 ownerIds 的�
 assert.match(textOf(groupAgent.received[0]), /陌生人/, '认人规矩里应该说明陌生人边界')
 assert.match(
   textOf(groupAgent.received[0]),
-  /\[\S+ \(\d+\)\S* \d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（(凌晨|早上|上午|中午|下午|傍晚|晚上|深夜)）\]/,
+  /⟨\S+ \(\d+\)\S* \d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（(凌晨|早上|上午|中午|下午|傍晚|晚上|深夜)）⟩/,
   '群历史行应该自带星期和时段',
 )
 console.log('✓ 群聊注入认人规矩')
@@ -302,7 +302,7 @@ mock.emitEvent({
 await waitFor(() => groupAgent.received.length === 3, { what: '第二轮群聊入站' })
 assert.match(
   textOf(groupAgent.received[2]),
-  /\[你（[^\）]*） \d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（[^）]*）\] 在的在的/,
+  /⟨你（[^）]*） \d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（[^）]*）⟩ 在的在的/,
   '自己发过的话应该以「你（昵称）」写进群历史',
 )
 console.log('✓ 自己说的话进历史并标成「你」')

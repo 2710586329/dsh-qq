@@ -206,6 +206,32 @@ function makeConfig(over = {}) {
   w.stop()
 }
 
+// ── 多个会话同时冷场：别一起打出去（2026-10-30 加）──
+// 19:40 那一轮，三只各自 2–3 个 peer 同时冷场，同一秒 void 出去 8 个 agent 调用，
+// 三只处理链一起堵死。现在改成：先收齐候选、最久的先开、一轮最多 2 个口、剩下的下一轮。
+{
+  const oldest = fakeRecord('最久', 90 * 60 * 1000)
+  const middle = fakeRecord('次久', 60 * 60 * 1000)
+  const fresh = fakeRecord('刚冷', 25 * 60 * 1000)
+  const m = fakeManager([fresh, oldest, middle]) // 故意乱序，验证排序
+  const w = createWake({
+    config: makeConfig({ proactiveMaxPerDay: 5 }),
+    manager: m,
+    logger: {},
+    staggerMs: 0, // 测试不真等 4–12 秒
+  })
+  w.start()
+  w.tick()
+  await new Promise((r2) => setTimeout(r2, 30))
+  check('一轮最多开 2 个口', m.fired.length, 2)
+  check('最久没说话的先开', m.fired, ['最久', '次久'])
+  // 下一轮：刚开过口的两个被 1.5 倍间隔挡住，剩下的那个补上（排队不丢）
+  w.tick()
+  await new Promise((r2) => setTimeout(r2, 30))
+  check('剩下的下一轮补上', m.fired, ['最久', '次久', '刚冷'])
+  w.stop()
+}
+
 // ── 提示词 ──
 {
   const groupText = proactiveRule({}, { label: '测试群', silentMin: 32, isGroup: true, now: new Date(2026, 9, 24, 20, 40) })

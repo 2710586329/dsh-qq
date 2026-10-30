@@ -1,6 +1,6 @@
 import { appendFileSync, mkdirSync, statSync, watchFile, unwatchFile } from 'node:fs'
 import { join } from 'node:path'
-import { ConfigSchema } from './config.js'
+import { ConfigSchema, listOf } from './config.js'
 import { OneBotClient } from './onebot/client.js'
 import { textSegments } from './onebot/segment.js'
 import { SessionManager } from './session.js'
@@ -51,6 +51,18 @@ function localStamp(d) {
   const off = -d.getTimezoneOffset()
   const abs = Math.abs(off)
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}${off >= 0 ? '+' : '-'}${p(Math.floor(abs / 60))}:${p(abs % 60)}`
+}
+
+/** 人味延迟：指数分布采样，均值 meanMs。
+ * 为什么不用固定值——固定间隔发出去是「节拍器」，一眼看得出不是人。
+ * 指数分布大部分落在均值以下、偶尔拉长，才像人一边想一边打
+ * （2026-10-29 姐姐要求：每句话之间、收到消息到开口，都按均值 0.5 秒来）。
+ * 两头夹住：太短等于没加、太长像卡了。 */
+function humanDelay(meanMs) {
+  const mean = Math.max(0, Number(meanMs) || 0)
+  if (mean <= 0) return 0
+  const jittered = -Math.log(1 - Math.random()) * mean
+  return Math.min(Math.max(jittered, mean * 0.4), mean * 4)
 }
 
 function makeLogger(ctx, config) {
@@ -378,6 +390,15 @@ const pin = createPin({ config, logger })
     // 群聊：两条回复之间拉开一点。一群人追着问的时候，
     // 连着往外吐最容易被人当成刷屏，也最容易被风控。
     const gapMs = record.scope === 'group' ? Math.max(0, Number(config.groupMinGapMs) || 0) : 0
+
+    // 人味：隔了 20 秒以上才算「新的一轮」，开口前先"看一会儿消息"再打字。
+    // 同一轮连发不加——一段一段往外吐的时候每段都卡半秒，反而像卡带。
+    const replyMean = Math.max(0, Number(config.replyDelayMeanMs) || 0)
+    if (replyMean > 0) {
+      const sinceLast = Date.now() - (lastSentAt.get(rateKey) ?? 0)
+      if (sinceLast > 20_000) await sleep(humanDelay(replyMean))
+    }
+
     if (gapMs > 0) {
       const last = lastSentAt.get(rateKey) ?? 0
       const wait = last + gapMs - Date.now()
@@ -406,7 +427,11 @@ const pin = createPin({ config, logger })
         bridge.noteSendFailure(record, chunks[index], err)
         break
       }
-      if (index < chunks.length - 1) await sleep(config.splitDelayMs)
+      if (index < chunks.length - 1) {
+        // 分条之间：随机（均值 splitDelayMeanMs），不是固定节拍器
+        const splitMean = Math.max(0, Number(config.splitDelayMeanMs) || 0)
+        await sleep(splitMean > 0 ? humanDelay(splitMean) : config.splitDelayMs)
+      }
     }
 
     // 自己发出去的话也要进历史：不然下一轮它看不见「我说过什么」，
@@ -523,11 +548,18 @@ const pin = createPin({ config, logger })
     logger.info('wsUrl 还没填，先不连接 NapCat（填好并保存后会自动接上）')
   }
   // 私聊门控：默认 allowlist，白名单空着 = 谁都不理。不说清楚，用户会以为「加了好友怎么没反应」。
-  const privateAllow = (config.privateAllow ?? []).map(String).filter(Boolean)
+  const privateAllow = listOf(config.privateAllow)
   if (config.replyToPrivate && config.privateMode === 'allowlist' && privateAllow.length === 0) {
+    let where = ''
+    try {
+      where = settingsFileOf(ctx, logger)
+    } catch {
+      where = ''
+    }
     logger.warn(
       '私聊白名单（privateAllow）是空的：现在任何人私聊都不会被回应。' +
-        '要把谁放进来，去设置 → QQ 里填他的 QQ 号；想谁都聊就把 privateMode 改成 open。',
+        '要把谁放进来，去设置 → QQ 里填他的 QQ 号；想谁都聊就把 privateMode 改成 open。' +
+        (where ? `也可以直接改这个文件：${where}（填 "privateAllow": ["你的号"]，保存约 800ms 生效）` : ''),
     )
   }
   wake.start()

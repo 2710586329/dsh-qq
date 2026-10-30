@@ -28,6 +28,10 @@ Thumbs.db
 test/tmp-*.mjs
 test/ws-probe.mjs
 
+# 一次性脚本与改配置前的备份（2026-10-30 补：原来没盖住，一 git add -A 就混进来）
+临时_*.mjs
+*.bak-*
+
 # 本地快照（发布前备份，不进仓库）
 快照/
 .tmp/

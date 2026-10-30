@@ -103,8 +103,175 @@ const HAS_CJK = /[\u4e00-\u9fa5]/
 /** 行尾挂一句「— good.」「- fine.」，是模型在给上一句打分，不是在说话。 */
 const SELF_TAIL = /[—–-]{1,2}\s*(?:good|fine|ok|works?|nice)\s*\.?\s*$/i
 
+/**
+ * 2026-10-29 16:25:36 / 16:29:54 老二连着两次把「改稿时的自我点评」当正文发出去：
+ *   `破折号? fine.` / `逗号 ok.` —— 只点评一个标点，后面跟个英文词。
+ * HAS_CJK 拦不住它们（「破折号」三个汉字），LEAK_LINE 也拦不住（不是英文开头）。
+ * 判据收紧成三条同时成立：出现标点/篇幅类元词 + 有英文词 + 行本身很短。
+ * 正常说话里这三条凑不齐——`破折号少用一点` 没有英文词，放过。
+ */
+const META_WORD_RE = /(?:破折号|逗号|句号|问号|省略号|标点|字数|长度|这句|这句太|太长了|太短了)/
+function looksSelfReview(line) {
+  const t = String(line ?? '').trim()
+  if (!t || t.length > 20) return false
+  if (!META_WORD_RE.test(t)) return false
+  return (t.match(/[A-Za-z]{2,}/g) ?? []).length >= 1
+}
+
+/**
+ * 2026-10-29 16:29:54 老二把插件塞给它的**上下文行**当正文复读了出来：
+ *   `[现在是 2026-10-29 周四 16:41（下午）]` + `[姐姐] 妹妹吃饱了没`
+ * 这两行是 inbound.js 拼给 agent 看的信封（`parts.push(`[现在是 ${humanTime()}]`)`、
+ * `[${ownerLabel}] ${head}`），不是话。而且那行时间还是它自己编的（当时 16:29，它写 16:41）。
+ * 只认这两种信封形状 + 独占一行的长度上限，正文里正常用方括号的话不受影响。
+ */
+const CONTEXT_ECHO_RE = new RegExp(
+  '^(?:' +
+    '\\[现在是[^\\]]{2,40}\\]' + // 时间信封
+    '|\\[(?:姐姐|主人)\\]' + // 私聊里主人/姐姐的信封标签
+    '|\\[(?:群友|群友\\d+)\\s[^\\]]{0,20}\\]' + // 群聊 historyLine 的信封标签
+    ')\\s*[^\\n]{0,80}$',
+)
+
+/**
+ * 2026-10-29 18:28 老二私聊又漏了一次，这次是**英文改稿标签**漏进正文：
+ *   `赢了没` / `— better: 打爽了没，吃什么` / `赢了没.`
+ *   `Reply: 平手，还行` / `Short: 一胜一负，不亏` / `Then wait. …`
+ * 这几种都是「给上一句提修改意见」的标签行，不是话。looksSelfReview 只认中文的
+ * 破折号/字数那类元词，英文形态一个都认不出——补一条按形状认的：
+ * 行首是 `—`/`-`/`–` 起头的英文标签，或者直接 `Word:` / `Word's:` 起头，
+ * 且整行不长。正常正文里不会用英文标签开头。
+ */
+const REWRITE_LABEL_RE =
+  /^(?:[-—–]{1,2}\s*)?(?:better|actually|instead|alternative|alt|option|rewrite|reword|reply|shorter|short|longer|long|version|v\d|note|check|maybe|then)\s*[:：]/i
+function looksRewriteNote(line) {
+  const t = String(line ?? '').trim()
+  if (!t || t.length > 48) return false
+  if (!REWRITE_LABEL_RE.test(t)) return false
+  // 纯英文的「Note: xxx」也可能是正文，只有后面还跟着中文（说明是在点评中文草稿）才删
+  return HAS_CJK.test(t)
+}
+
+/**
+ * 2026-10-29 16:25:36 / 16:29:54：同一句话的四版草稿**只用单换行隔开**，
+ * collapseRepeats 是按空行分段（`\\n\\s*\\n`）的，看不进来，四版原样发了出去。
+ * 这里补一层「相邻行」判重：紧挨着的两行相似度 ≥0.6 且都不短 → 只留更长那一版。
+ * 空行是段落分界，跨过空行就不合并（那段归 collapseRepeats 管）。
+ */
+function collapseDraftLines(lines) {
+  const out = []
+  for (const raw of lines) {
+    // null = 这一行被判成自评/上下文信封删掉了，**不是空行**——不能在这里留段落分隔，
+    // 否则夹在被删行中间的两版草稿会被这条假空行隔开、合并不上（16:25:36 就是这么漏的）。
+    if (raw === null) continue
+    const t = raw.trim()
+    if (!t) {
+      if (out.length > 0 && out[out.length - 1] !== '') out.push('')
+      continue
+    }
+    const prev = out.length > 0 ? out[out.length - 1] : ''
+    if (prev) {
+      const short = Math.min(t.length, prev.length)
+      if (short >= 8 && lcsLength(t, prev) / short >= 0.6) {
+        if (t.length >= prev.length) out[out.length - 1] = t
+        continue
+      }
+    }
+    out.push(t)
+  }
+  return out
+}
+
+/**
+ * 2026-10-29 16:29:54：模型把同一个回答写成四种说法，字面差得多，LCS 抓不住：
+ *   有点撑，这碗太实了 / 饱了，扒太急，现在有点撑 / 饱了，米饭太实在，坐那儿缓着呢 / 饱了，这碗分量给得太实在
+ * 相邻相似度只有 0.33–0.50，但四行里三行都以「饱了」开头——**同头**才是这几版的身份。
+ * 判据：连续非空行 ≥3 行，其中 ≥60% 共享开头三个字、且这一组本身就 ≥3 行 → 整段只留最长的一版。
+ * 正常多行正文开头各不相同，不会触发。
+ */
+function collapseSameHeadRun(lines) {
+  const headOf = (s) => s.replace(/^["'“‘「『]/, '').slice(0, 3)
+  const out = []
+  let i = 0
+  while (i < lines.length) {
+    if (typeof lines[i] !== 'string' || !lines[i]) {
+      out.push(lines[i])
+      i += 1
+      continue
+    }
+    let j = i
+    while (j < lines.length && typeof lines[j] === 'string' && lines[j]) j += 1
+    const run = lines.slice(i, j)
+    if (run.length >= 3) {
+      const counts = new Map()
+      for (const s of run) {
+        const h = headOf(s)
+        counts.set(h, (counts.get(h) ?? 0) + 1)
+      }
+      let bestHead = ''
+      let bestN = 0
+      for (const [h, n] of counts) if (n > bestN) { bestHead = h; bestN = n }
+      if (bestN >= 3 && bestN / run.length >= 0.6) {
+        const pick = run
+          .filter((s) => headOf(s) === bestHead)
+          .sort((a, b) => b.length - a.length)[0]
+        out.push(pick)
+        i = j
+        continue
+      }
+    }
+    for (const s of run) out.push(s)
+    i = j
+  }
+  return out
+}
+
 /** 剥掉行首标签后还剩下的英文词——用来判「这行其实是自评」。 */
 const EN_WORD = /[A-Za-z]{2,}/
+
+/**
+ * 2026-10-29 18:29:14 老三的正文是 `嗯` / `嗯，那就先压着` / `嗯.`，三行全发了。
+ * 18:28:45 老二也是 `赢了没` / `…` / `赢了没.`。
+ * 这几版不是「相似」，是**一个残片 + 它的完整版**：短的那行就是长那行的开头。
+ * collapseDraftLines 的 LCS 按最短那行算比例，`嗯` vs `嗯，那就先压着` 只比 1 个字，
+ * short=1 直接被门槛挡掉；collapseSameHeadRun 又要求凑够三行同头。所以补一条只认「前缀」的：
+ *   - 去标点后完全相等 → 只留先出现的那一个（`赢了没` / `赢了没.`）
+ *   - 去标点后 A 是 B 的真前缀、且 A ≤5 字 → A 是残片，删 A（`嗯` 删，留 `嗯，那就先压着`）
+ * 只在相邻 3 行的窗口里比，跨空行不算（空行是段落边界）。
+ */
+function dropShortPrefixes(lines) {
+  const norm = (s) =>
+    String(s)
+      .replace(/[。！？!?…，,、；;：:.\s"'“”‘’「」『』（）()—–-]/g, '')
+      .trim()
+  const killed = new Set()
+  for (let i = 0; i < lines.length; i += 1) {
+    if (typeof lines[i] !== 'string' || !lines[i] || killed.has(i)) continue
+    const a = norm(lines[i])
+    if (!a) continue
+    for (let j = i + 1; j < Math.min(lines.length, i + 4); j += 1) {
+      if (typeof lines[j] !== 'string') break
+      if (!lines[j]) break // 撞到空行，跨段不比
+      if (killed.has(j)) continue
+      const b = norm(lines[j])
+      if (!b) continue
+      if (a === b) {
+        killed.add(j) // 同义重复，留先出现的
+        continue
+      }
+      // 残片在后面（`嗯，那就先压着` → `嗯.`）→ 删后面那截
+      if (b.length <= 5 && a.startsWith(b)) {
+        killed.add(j)
+        continue
+      }
+      if (a.length <= 5 && b.startsWith(a)) {
+        killed.add(i) // 这一行是残片
+        break
+      }
+    }
+  }
+  return lines.filter((_, i) => !killed.has(i))
+}
 
 /** 最长公共子序列的长度——用来判两段是不是「同一句换了几个字」。 */
 function lcsLength(a, b) {
@@ -293,8 +460,19 @@ export function stripLeakedThinking(text) {
   const kept = repairShape(text).split('\n').map((line) => {
     let t = line.trim()
     if (!t) return ''
+    // 模型自己的界面标记（`已思考（用时1秒）好模型`）→ 剥掉标记，话留下；只剩标记就丢
+    if (THINK_MARK_RE.test(t)) {
+      t = t.replace(THINK_MARK_RE, '').trim()
+      if (!t) return null
+    }
+    // 整行是插件自己的上下文信封（`[现在是 …]` / `[姐姐] …`）→ 不是话，丢掉
+    if (CONTEXT_ECHO_RE.test(t)) return null
+    // 整行是「点评自己上一句」的元话（`破折号? fine.`）→ 丢掉
+    if (looksSelfReview(t)) return null
+    // 整行是英文改稿标签（`— better: 打爽了没` / `Reply: 平手，还行`）→ 丢掉
+    if (looksRewriteNote(t)) return null
     // 整行就是一句自评（`Hmm 这句要短一点。`）→ 整行丢掉
-    if (LEAK_LINE.some((re) => re.test(t))) return ''
+    if (LEAK_LINE.some((re) => re.test(t))) return null
     // 整行是「下一步要干什么」（`先 glob 便签.md。`）→ 同样整行丢掉。
     // 但非流式那条路整段是**一行**，planning 句常夹在中间
     // （`用 glob 列门口目录下的 md 文件。…但可能还有别的信。`）——整行丢会把后面
@@ -308,19 +486,19 @@ export function stripLeakedThinking(text) {
       looksPlanning(parts[1] ?? '') &&
       t.length <= 120
     ) {
-      return ''
+      return null
     }
     if (parts.length > 1 && parts.some((s) => looksPlanning(s))) {
       t = parts.filter((s) => !looksPlanning(s)).join('')
-      if (!t) return ''
+      if (!t) return null
     } else if (looksPlanning(t)) {
-      return ''
+      return null
     }
     // 行尾挂了个「— good.」（模型在给上一句打分）→ 整行丢掉
-    if (SELF_TAIL.test(t)) return ''
+    if (SELF_TAIL.test(t)) return null
     // 一个汉字都没有（`That's factual and short. Two lines is fine.`）→ 不是话，丢掉。
     // 短行放过：`?` `…` `OK` 这种本来就可能是话的一部分。
-    if (!HAS_CJK.test(t) && t.length >= 4) return ''
+    if (!HAS_CJK.test(t) && t.length >= 4) return null
     // 只是行首粘了个英文小标签（`Good.本姑娘这边显示是发出去了`）→ 剥掉标签，话留下。
     // 2026-10-26 19:40 修：`987654321 空着，123456789 只有几条` 这种**数字开头的正文**
     // 也被当成标签剥了一半（群号没了）。标签里必须至少有一个字母才算标签。
@@ -330,12 +508,17 @@ export function stripLeakedThinking(text) {
       // 剥完还留着两个以上英文词（`-like with 3 lines. Compress to 2. 眼下是两个`）
       // → 这行主体就是自评，后面粘的中文是草稿，整行丢
       const enWords = rest.split(/\s+/).filter((w) => EN_WORD.test(w)).length
-      if (enWords >= 2) return ''
+      if (enWords >= 2) return null
       return rest
     }
     return t
   })
-  return collapseRepeats(dedupeLines(kept).join('\n').replace(/\n{3,}/g, '\n\n').trim())
+  return collapseRepeats(
+    dedupeLines(dropShortPrefixes(collapseSameHeadRun(collapseDraftLines(kept))))
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim(),
+  )
 }
 
 /** 太短不算一句，避免「嗯。」单独发一条。 */
@@ -345,6 +528,13 @@ const MIN_SENTENCE = 6
 function cjkCount(text) {
   return (String(text).match(/[\u4e00-\u9fa5]/g) ?? []).length
 }
+
+/**
+ * 模型把自己那边的界面标记当成正文写出来了。
+ * 2026-10-29 18:42：正文是「已思考（用时1秒）好模型」——那是 UI 上的折叠条，
+ * 它照着抄了一遍。剥掉标记留话；整行只有标记就丢。
+ */
+const THINK_MARK_RE = /^已?(?:深度)?思考[（(]\s*用时[^）)]{0,16}[）)]\s*[：:，,]?\s*[）)]?\s*/
 
 /**
  * 模型偶尔把答案整个写进 reasoning 通道，text 块是空的。
@@ -439,6 +629,19 @@ const META_WORD =
   /再加|加一点|减一点|改一下|改一改|换个说法|说得|写得|语气|口吻|温度|太长|太短|短一点|长一点|字数|句子|一句/g
 /** 自问自答的样子：「嗯，但会不会显得太冷淡？不，规矩说不发也可以。」 */
 const SELF_TALK = /会不会|要不要|该不该|是不是(?:觉得|显得|太)|显得太/
+
+/**
+ * 2026-10-29 19:00：这条尾巴像不像中文话。
+ * 老二/老三用英文思考时正文容易空，兜底会把英文推理尾巴捞出来当话发——
+ * 「Actually she's about to eat — better: 打爽了没」这种。中文尾巴照旧捞
+ * （2026-10-26 17:15、17:16 那两次就是中文），只拦英文为主的。
+ */
+function mostlyChinese(s) {
+  const src = String(s ?? '')
+  const cjk = (src.match(/[\u4e00-\u9fff]/g) ?? []).length
+  const latin = (src.match(/[A-Za-z]/g) ?? []).length
+  return cjk >= 4 && cjk * 2 >= latin
+}
 
 export function stripMetaTalk(text) {
   const src = String(text ?? '').trim()
@@ -673,6 +876,13 @@ export function createOutbound({ manager, config, logger, send, wake }) {
           // 2026-10-27 15:08 事故：兜底捞出「再加一点温度：不用太长。／好，一句。」这种改稿指令。
           // 先剥掉元话语；剥空了就当这轮没话，不发。
           text = stripMetaTalk(tailed)
+          // 2026-10-29 19:00：剥完还得是中文话。模型用英文思考时正文容易空，
+          // 兜底顺手把英文推理尾巴当成话发出去（老二 18:42 那次就是桌面端只有思考、
+          // QQ 却收到一条）。中文尾巴照旧捞——这条闸只拦英文为主的。
+          if (text && !mostlyChinese(text)) {
+            logger.info?.(`[dsh-qq] ${record.label} 兜底内容不是中文（模型在用英文思考），这轮不发`)
+            text = ''
+          }
         }
       }
       if (!text) return

@@ -7,6 +7,25 @@ import Schema from '@deepseek-ai/schemastery'
  *  - 所有跟「连谁、允许谁说话、放开到什么程度」有关的键，默认都是保守的；
  *  - provider / model / preset / cwd 一律留空跟随宿主，避免把某个人的环境写死。
  */
+/**
+ * 把一个「本该是数组」的配置值安全地取成字符串数组（issue #3）。
+ *
+ * 为什么要有它：`privateAllow` / `groupAllow` 既能写在 settings.json 里，也能写在
+ * profile 的 `cordis.patch.yml` 里，人把它写成 `"123456"` 这种单个字符串是常事。
+ * 原来的写法 `(config.privateAllow ?? []).map(...)` 会直接抛
+ * `TypeError: (c.privateAllow ?? []).map is not a function`，而且抛出点在入站处理
+ * 深处、离配置项很远，用户只能看到「消息没反应」，看不出是自己少写了方括号。
+ *
+ * 规则：数组照收；字符串按逗号 / 中文逗号 / 空白拆；数字当单个号；其余（null、
+ * undefined、对象、布尔）一律当空。每项 trim 后丢掉空串，所以 `"a, ,b"` 也能用。
+ */
+export function listOf(v) {
+  if (Array.isArray(v)) return v.map((x) => String(x ?? '').trim()).filter(Boolean)
+  if (typeof v === 'string') return v.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean)
+  if (typeof v === 'number' || typeof v === 'bigint') return [String(v)]
+  return []
+}
+
 export const ConfigSchema = Schema.object({
   // ── 连接 ──
   wsUrl: Schema.string()
@@ -38,6 +57,11 @@ export const ConfigSchema = Schema.object({
   workspaceRoot: Schema.string()
     .default('')
     .description('每个 QQ 会话的独立工作目录放在哪里；留空用 <cwd>/会话'),
+  faceRoot: Schema.string()
+    .default('')
+    .description(
+      '表情包收藏（`表情包收藏.json` + `表情包/`）放在哪个目录。三只 QQ 鲸鲸填同一个路径就是共用一套收藏；留空则跟 `workspaceRoot` 走（各存各的）',
+    ),
   doorDir: Schema.string()
     .default('')
     .description(
@@ -46,6 +70,13 @@ export const ConfigSchema = Schema.object({
   isolateByPeer: Schema.boolean()
     .default(true)
     .description('每个私聊/每个群各自一个工作目录与记忆区（互不可见，也不碰宿主的私人记忆区）'),
+  memoryRoot: Schema.string()
+    .default('')
+    .description(
+      '全家共用的记忆区根目录（比如 D:/鲸鲸的专用文件/本地记忆区）。填了才注册 `qq_memo` 这支笔：' +
+        '会话的工作目录在 peer 目录里，agent 自己的写工具出不去（文件沙箱按会话工作目录算）；' +
+        '要往全家的日记、今天.md、项目文档里写，就靠它代笔——插件跑在宿主进程里，直接写文件，不受 agent 沙箱限制。留空 = 关掉这支笔',
+    ),
   persona: Schema.string()
     .default('')
     .description(
@@ -156,6 +187,15 @@ export const ConfigSchema = Schema.object({
   peerBots: Schema.array(Schema.string())
     .default([])
     .description('已知的同类机器人 QQ 号；填了才认得出「这句是别的机器人发的」（NapCat 也带 is_robot 时同样认）'),
+  // 2026-10-29 姐姐：「有没有办法能做到能私聊，但是能停下」——同类连着聊的刹车。
+  // 私聊里两只鲸鲸互相回话没有天然终点：A 回 B，B 又回 A，每轮都算「有人跟我说话」，
+  // 出站限流只能把它压慢、停不下来。这个数字是「连着接几轮就先不接」；真人一开口就清零。
+  peerChatMaxTurns: Schema.number()
+    .default(0)
+    .description(
+      '同类机器人连着聊最多接几轮（0 = 不限制）；超过就先不投递、只留痕，真人一开口就清零。' +
+        '私聊互通时靠它自动散场，不用人盯着关',
+    ),
   privateMode: Schema.union(['open', 'allowlist', 'disabled'])
     .default('allowlist')
     .description(
@@ -239,7 +279,13 @@ export const ConfigSchema = Schema.object({
     .description('是否把工具调用结果也发到 QQ（默认关闭，只发文字回复）'),
   splitDelayMs: Schema.number()
     .default(400)
-    .description('分条发送之间的间隔，单位毫秒'),
+    .description('分条发送之间的间隔，单位毫秒（splitDelayMeanMs > 0 时改用随机间隔，这项当兜底）'),
+  replyDelayMeanMs: Schema.number()
+    .default(500)
+    .description('收到消息后隔多久才开口，单位毫秒、指数分布均值（0 = 立刻回）。真人不会在同一毫秒回话；同一轮连发不重复等，隔 20 秒以上才算新的一轮'),
+  splitDelayMeanMs: Schema.number()
+    .default(500)
+    .description('分条发送之间的间隔均值，单位毫秒、指数分布（0 = 用 splitDelayMs 的固定值）。真人是一条一条打的，齐刷刷吐出来不像人'),
   rateLimitPerMin: Schema.number()
     .default(12)
     .description('每个会话每分钟最多发几条（0 = 关闭）。QQ 对高频回复很敏感，被限流甚至被封往往不是因为说了什么，而是因为回得太多'),

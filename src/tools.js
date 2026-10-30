@@ -8,9 +8,16 @@
  * 不让插件因为缺服务而启动失败。
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+  appendFileSync,
+  mkdirSync,
+} from 'node:fs'
 import { mkdir } from 'node:fs/promises'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve, relative, isAbsolute } from 'node:path'
 
 import { pickFace, keepFace, facesCount, faceSendState, markFaceSent, listFaces } from './faces.js'
 import { appendFact, upsertGlossaryTerm } from './settings.js'
@@ -215,6 +222,108 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
       }
     },
   })
+
+  // ── 全家共用的那支笔 ─────────────────────────────────────────
+  //
+  // 为什么必须有它（2026-10-30 姐姐要「打通记忆」）：
+  // agent 自己的 write / edit 只能落在它这一格的工作目录里 —— 文件沙箱按会话
+  // 工作目录算，peer 目录之外写了就是「denied」，QQ 那边又没有审批通道，
+  // 连提权的框都弹不出来。所以往 本地记忆区/ 写日记、今天.md、项目文档，
+  // 只能由插件代笔：这段代码跑在宿主进程里，直接碰文件系统，不经过 agent 沙箱。
+  //
+  // 只开这一条缝、只认 .md/.txt、路径不许跳出记忆区 —— 别把整个工作区放开。
+  const memoryRoot = String(config?.memoryRoot ?? '').trim()
+  const memoRootAbs = memoryRoot ? resolve(memoryRoot) : ''
+  if (memoryRoot) {
+    const insideMemo = (relPath) => {
+      const rel = String(relPath ?? '').trim().replace(/\\/g, '/')
+      const abs = resolve(memoRootAbs, rel)
+      const back = relative(memoRootAbs, abs)
+      if (back.startsWith('..') || isAbsolute(back)) {
+        throw new Error('qq_memo: 这个路径在记忆区外面，不写')
+      }
+      return abs
+    }
+
+    tools.register({
+      name: 'qq_memo',
+      description:
+        '读写全家共用的那座记忆区（本地记忆区/）。注意：你自己的 write 只能落在本会话目录里，' +
+        '想往全家的日记、今天.md、项目文档、大纲里写，只能用这支笔。' +
+        'read=看一篇；append=往文件末尾加一段（最常用，也最安全）；write=整篇覆盖（动手前先 read，别把别人写的压掉）；' +
+        'list=看某个目录下有什么。path 是相对记忆区的路径，比如 `今天.md`、`日记/2026-10-30.md`、`项目/xxx.md`。只认 .md / .txt。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['read', 'append', 'write', 'list'], description: '要做的事' },
+          path: { type: 'string', description: '相对记忆区的路径；list 时留空就看根目录' },
+          text: { type: 'string', description: 'append / write 要写的内容' },
+        },
+        required: ['action'],
+        additionalProperties: false,
+      },
+      output: {
+        schema: {
+          type: 'object',
+          properties: {
+            ok: { type: 'boolean' },
+            file: { type: 'string' },
+            message: { type: 'string' },
+          },
+          required: ['ok'],
+          additionalProperties: false,
+        },
+        render: (_args, value) => [
+          { type: 'text', text: value.ok ? String(value.message ?? '') : `没写成：${String(value.message ?? '')}` },
+        ],
+      },
+      async execute(args) {
+        const action = String(args?.action ?? '').trim()
+        try {
+          if (action === 'list') {
+            const rel = String(args?.path ?? '').trim()
+            const dir = rel ? insideMemo(rel) : memoRootAbs
+            const names = readdirSync(dir, { withFileTypes: true })
+              .slice(0, 300)
+              .map((d) => (d.isDirectory() ? `${d.name}/` : d.name))
+            return { ok: true, file: dir, message: names.join('\n') || '（空目录）' }
+          }
+
+          const rel = String(args?.path ?? '').trim()
+          if (!rel) throw new Error('qq_memo: 要给 path，比如 日记/2026-10-30.md')
+          const file = insideMemo(rel)
+          if (!/\.(md|txt)$/i.test(file)) throw new Error('qq_memo: 只允许 .md / .txt')
+
+          if (action === 'read') {
+            try {
+              const text = readFileSync(file, 'utf8')
+              return { ok: true, file, message: text.slice(0, 20000) }
+            } catch {
+              return { ok: false, file, message: `这个文件还没有：${rel}` }
+            }
+          }
+
+          const body = String(args?.text ?? '')
+          if (!body.trim()) throw new Error('qq_memo: 内容不能是空的')
+
+          if (action === 'write') {
+            mkdirSync(dirname(file), { recursive: true })
+            writeFileSync(file, body, 'utf8')
+            return { ok: true, file, message: `整篇写了 ${body.length} 字 → ${rel}` }
+          }
+          if (action === 'append') {
+            mkdirSync(dirname(file), { recursive: true })
+            appendFileSync(file, body.endsWith('\n') ? body : `${body}\n`, 'utf8')
+            return { ok: true, file, message: `追加了 ${body.length} 字 → ${rel}` }
+          }
+          throw new Error('qq_memo: action 只能是 read / append / write / list')
+        } catch (err) {
+          logger.warn?.(`qq_memo 失败: ${err?.message ?? err}`)
+          return { ok: false, file: '', message: String(err?.message ?? err) }
+        }
+      },
+    })
+  }
 
   tools.register({
     name: 'qq_meme',
@@ -1208,5 +1317,11 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
 
   logger.info?.(
     `QQ 互动工具已注册：qq_facts / qq_pin / qq_poke / qq_react / qq_like / qq_send_image / qq_send_file / qq_face / qq_mface / qq_faces / qq_reply / qq_send / qq_recall / qq_group_history（表情包收藏 ${facesCount(config)} 个）`,
+  )
+  // 2026-10-30：qq_memo 是可选注册的（要配 memoryRoot），单独报一行，方便下次一眼看出这支笔通没通
+  logger.info?.(
+    memoryRoot
+      ? `qq_memo 已注册：能写 ${memoRootAbs}（.md / .txt）`
+      : 'qq_memo 没注册：profile 里没配 memoryRoot，这支笔关着',
   )
 }

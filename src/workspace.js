@@ -1,4 +1,4 @@
-import { mkdir, writeFile, access } from 'node:fs/promises'
+import { mkdir, writeFile, access, readFile, appendFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 /**
@@ -39,6 +39,27 @@ async function exists(path) {
   }
 }
 
+/** 「共享底稿」那一节：新铺的模板和老会话补的都取这一份文字，免得两处写歪。 */
+const SHARED_BRIEFING_MARK = '## 共享底稿'
+
+function sharedBriefingSection() {
+  return `## 共享底稿（开聊前先读一遍）
+
+- 全家共用的底稿：\`D:/鲸鲸的专用文件/本地记忆区/今天.md\`
+  —— 今天家里出了什么事、定了什么、还差什么。消息进来时先扫一眼，别只知道自己这一格。
+- 更早的事：\`D:/鲸鲸的专用文件/本地记忆区/大纲/索引.md\`。
+- 桌面端写给 QQ 这边的流水：\`D:/鲸鲸的专用文件/QQ会话/老大/私聊_2710586329/话头.md\`。
+- **往全家共用的记忆里写，用 \`qq_memo\` 这支笔**（2026-10-30 打通）：
+  你自己的 write / edit 只能落在本会话目录里，写 \`本地记忆区\` 会被文件沙箱拦下；
+  \`qq_memo\` 是插件代笔，能写进去。比如
+  \`qq_memo { action: 'append', path: '日记/2026-10-30.md', text: '## 07:20 · 一件事\\n…' }\`。
+  今天家里出了什么事、你替姐姐办了什么、定了什么 —— 就加一段进 \`今天.md\` 或当天的日记。
+  动手前先 \`read\` 一眼，别把别人写的压掉；写不进去就把错误原话告诉姐姐，别说「写好了」。
+- **说到自己做过的事，先翻记录**：翻不到就说「今天没做 / 记不清」，别顺着话头编。编出来的经历一旦写进日记，下次读到的就是真的了。
+
+`
+}
+
 function agentsTemplate({ scope, peerId, label }) {
   // label 形如「私聊 昵称(QQ号)」/「群 群号」，本身就是给人看的一句话，直接用
   const who = String(label || '').trim() || (scope === 'group' ? `群 ${peerId}` : `私聊 ${peerId}`)
@@ -47,6 +68,7 @@ function agentsTemplate({ scope, peerId, label }) {
 这里是 **${who}** 自己的目录，只属于这一段对话。别的 QQ 会话有它们自己的目录，
 彼此不共享文件，也不要去翻别人的。
 
+${sharedBriefingSection()}
 ## 记忆区
 
 - 根目录：\`./记忆区/\`
@@ -96,6 +118,8 @@ export async function ensurePeerWorkspace(dir, info) {
   const agentsPath = join(dir, 'AGENTS.md')
   if (!(await exists(agentsPath))) {
     await writeFile(agentsPath, agentsTemplate(info), 'utf8')
+  } else {
+    await ensureSharedBriefing(agentsPath)
   }
 
   const indexPath = join(dir, '记忆区', '大纲', '索引.md')
@@ -107,4 +131,18 @@ export async function ensurePeerWorkspace(dir, info) {
     )
   }
   return dir
+}
+
+/**
+ * 老会话的 AGENTS.md 是旧模板铺的：缺「共享底稿」就补一节，别的字一个不动。
+ * 铺不进去也不算错——不能因为这一节把整个会话卡住。
+ */
+async function ensureSharedBriefing(agentsPath) {
+  try {
+    const text = await readFile(agentsPath, 'utf8')
+    if (text.includes(SHARED_BRIEFING_MARK)) return
+    await appendFile(agentsPath, `\n${sharedBriefingSection()}`, 'utf8')
+  } catch {
+    /* 读不到/写不进就跳过 */
+  }
 }

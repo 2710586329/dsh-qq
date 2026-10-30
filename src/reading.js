@@ -1,6 +1,7 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { readdirSync, readFileSync } from 'node:fs'
 import { readingAskRule } from './prompts.js'
+import { listOf } from './config.js'
 import { parseQuietHours, inQuietHours } from './wake.js'
 
 /**
@@ -99,7 +100,7 @@ export function createReading({ config, manager, logger }) {
 
   /** 交给谁：readingPeer 优先，没填就用私聊白名单第一个。 */
   const peerId = () =>
-    String(config?.readingPeer ?? '').trim() || String(config?.privateAllow?.[0] ?? '').trim()
+    String(config?.readingPeer ?? '').trim() || listOf(config?.privateAllow)[0] || ''
 
   function findRecord() {
     const peer = peerId()

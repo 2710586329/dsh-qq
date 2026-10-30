@@ -2,6 +2,27 @@
 
 本文件记录 dsh-qq 的版本变更。格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号照 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.2.8] - 2026-10-30
+
+> 版本号从 1.2.4 直接跳到 1.2.8：1.2.5–1.2.7 只在本地打过包、没发到 npm（`npm view dsh-qq-onebot version` 当时还是 1.2.2），这里一次补齐，免得别人看到「装到的是 1.2.8、CHANGELOG 里没有」又得猜。
+
+### 修复
+
+- **`privateAllow` / `groupAllow` 写成字符串会把入站处理整个炸掉**（[issue #3](https://github.com/2710586329/dsh-qq/issues/3)）。原来四处都是裸的 `(config.privateAllow ?? []).map(...)`，配置写成 `"123456"`（少一对括号）就抛 `TypeError: (c.privateAllow ?? []).map is not a function`；抛出点在消息处理深处，用户只能看到「发了消息没反应」，看不出是配置写法问题。四处一起改：
+  - `src/inbound.js` 的 `allowPrivate()` / `allowGroup()`：门控判断
+  - `src/index.js` 的启动白名单检查：那句「白名单是空的」warn 自己会先崩
+  - `src/reading.js` 的 `peerId()`：原来用 `privateAllow?.[0]`，字符串会取到**第一个字符**，于是夜里读书问询发给一个不存在的号
+  - `src/wake.js` 的 `reviveCold()`：原来用 `Array.isArray` 挡着，字符串直接变空数组，冷会话复活静默失效
+  - 新增 `listOf()`（`src/config.js`）：数组照收；字符串按英文逗号 / 中文逗号 / 空白拆；数字当单个号；null、undefined、对象、布尔一律当空。四项都 trim 后丢空串。
+  - `test/allow-list.test.mjs`：17 条写法用例 + 四处源码护栏（哪天有人又写回裸 `.map()` 会红）。
+- **骨架 `settings.json` 的模板没跟上 1.2.2 的新默认值**（[issue #2](https://github.com/2710586329/dsh-qq/issues/2) 最后一条）。模板原来只有 `wsUrl` / `accessToken` / `selfId` 三行，而 `privateMode` 默认已经改成 `allowlist`——**白名单空着就谁都不理**，可这份骨架存在的场景恰好是「设置页没上场」，照它填完仍然一个字都收不到。现在模板补了 `"privateAllow": ["你的QQ号"]`，并明说「空着就谁都不理」和「只在自己机器上才建议 open」。
+- **启动那句「私聊白名单是空的」warn 没给文件路径**：说了「去设置 → QQ 里填」，但设置页没上场的人没有这条路。现在带上 `settings.json` 的完整路径和「填哪一行、约 800ms 生效」。
+
+### 新增
+
+- **`npm test` 能跑了**（同属 issue #2 最后一条：`test/` 没进包、也没有 `scripts.test`，CHANGELOG 里说的那些护栏装包的人既看不到也跑不到）。`package.json` 的 `files` 加上 `test`，加了 `"scripts": { "test": "node test/run-all.mjs" }`。
+- `test/run-all.mjs`：逐个 `node <file>` 跑（不用 `node --test` 的进程池——在某些 Windows 环境会直接 `spawn EPERM`，一个都跑不起来）。判定两条：退出码非 0，或输出里出现「失败 N」（N > 0）。起不了子进程时会单独报环境原因，不跟测试失败混在一起。
+
 ## [1.2.4] - 2026-10-27
 
 ### 修复

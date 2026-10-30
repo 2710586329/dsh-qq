@@ -1,6 +1,7 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { proactiveRule } from './prompts.js'
 import { doorLine } from './door.js'
+import { listOf } from './config.js'
 
 /**
  * 主动说话（冷场冒泡）。
@@ -29,6 +30,24 @@ const TICK_MS = 60_000
 const FIRE_TIMEOUT_MS = 300_000
 const MAX_SILENT_MISSES = 3
 
+// ── 别一起打出去（2026-10-30 加）──
+// 19:40 那一轮：三只各自 2–3 个 peer 同时冷场，同一秒里 void 出去 8 个 agent 调用，
+// 三只的处理链一起堵死，姐姐发消息半天没人应。
+// 三道闸：① 一轮最多开 2 个口（其余下轮再说，排队不丢）；② 口与口之间错开 4–12 秒；
+// ③ 单进程在飞不超过 3 个（上一轮还没聊完，就别再塞新的进去抢）。
+// 主动开口本来就是「不急」的事，慢一点没关系；堵住整条链才是大事。
+const MAX_FIRES_PER_TICK = 2
+const MAX_INFLIGHT = 3
+const STAGGER_MIN_MS = 4_000
+const STAGGER_MAX_MS = 12_000
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms)
+    t.unref?.()
+  })
+}
+
 function dayKey(d = new Date()) {
   return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`
 }
@@ -50,10 +69,21 @@ export function inQuietHours(range, d = new Date()) {
     : cur >= range.from || cur < range.to
 }
 
-export function createWake({ config, manager, logger, bridge }) {
+export function createWake({ config, manager, logger, bridge, staggerMs }) {
   const states = new Map() // sessionId -> { lastAt, lastProactiveAt, dayKey, count, misses }
   let timer = null
+  let startTimer = null
   let stopped = true
+  // 2026-10-30：tick 正在错开撒口的时候，别让 setInterval 再叠一轮进来
+  let ticking = false
+  // 主动轮里还没聊完的 agent 调用数（只数主动轮，不数正常对话）
+  let inflight = 0
+  // 错开时长：生产走 4–12 秒随机；测试传 staggerMs: 0 就不用等
+  const staggerDelay = () => {
+    const fixed = Number(staggerMs)
+    if (Number.isFinite(fixed)) return Math.max(0, fixed)
+    return STAGGER_MIN_MS + Math.random() * (STAGGER_MAX_MS - STAGGER_MIN_MS)
+  }
 
   const silentMs = () => Math.max(60_000, Number(config?.proactiveSilentMs) || 1_200_000)
   const maxPerDay = () => Math.max(0, Number(config?.proactiveMaxPerDay) || 0)
@@ -151,6 +181,7 @@ export function createWake({ config, manager, logger, bridge }) {
     st.pending = Date.now()
     // [SILENT] 是她自己的决定，不记 miss；只有投递真的失败才算（见 catch）
     logger.info?.(`[dsh-qq] ${record.label} 安静 ${silentMin} 分钟，给一次主动开口的机会`)
+    inflight += 1
     manager.enqueue(record, async () => {
       try {
         // 必须是完整的用户消息对象：直接传字符串的话，DSH 内部按消息结构去读
@@ -172,6 +203,8 @@ export function createWake({ config, manager, logger, bridge }) {
         st.pending = 0
         st.misses += 1
         logger.warn?.(`[dsh-qq] 主动开口失败 ${record.label}:`, err)
+      } finally {
+        inflight = Math.max(0, inflight - 1)
       }
     })
   }
@@ -188,7 +221,7 @@ export function createWake({ config, manager, logger, bridge }) {
     if (reviving) return
     reviving = true
     try {
-      const peers = Array.isArray(config?.privateAllow) ? config.privateAllow : []
+      const peers = listOf(config?.privateAllow)
       const max = Math.max(1, Number(config?.wakeColdMax) || 3)
       const hot = new Set(manager.list().map((r) => `${r.scope}:${String(r.peerId)}`))
       let n = 0
@@ -218,47 +251,92 @@ export function createWake({ config, manager, logger, bridge }) {
     const quota = maxPerDay()
     if (quota === 0) return
     if (inQuietHours(parseQuietHours(config?.proactiveQuietHours), now)) return
+    // 上一轮还在错开撒口（最多几十秒）：这一轮让位，别叠成两批
+    if (ticking) return
 
-    await reviveCold()
+    ticking = true
+    try {
+      await reviveCold()
 
-    const limit = silentMs()
-    for (const record of manager.list()) {
-      const st = stateOf(record)
-      // 上一轮机会投出去，却既没发话也没给 [SILENT]（那一轮报错退出了）：
-      // 过了投递超时就当没发生过，别让 pending 一直挂着。
-      if (st.pending && now.getTime() - st.pending > FIRE_TIMEOUT_MS * 2) st.pending = 0
-      if (record.busy > 0) continue
-      // record.lastActive 是队列层的活动时间：工具直接发消息（qq_reply 之类）也走任务，
-      // 任务结束就会刷新它，所以拿它兜底比只靠 noteOutbound 更准。
-      const lastAt = Math.max(st.lastAt, Number(record.lastActive) || 0)
-      const idleMs = now.getTime() - lastAt
-      if (idleMs < limit) continue
-      // 刚主动过一次：隔开一点，别连珠炮
-      if (st.lastProactiveAt && now.getTime() - st.lastProactiveAt < limit * 1.5) continue
-      const dk = dayKey(now)
-      if (st.dayKey !== dk) {
-        st.dayKey = dk
-        st.count = 0
+      const limit = silentMs()
+      // 先收齐候选再撒口：原来是在循环里直接 void fire，
+      // 满足条件的有几个就在同一毫秒打出去几个（2026-10-30 19:40 那次 8 个）。
+      const candidates = []
+      for (const record of manager.list()) {
+        const st = stateOf(record)
+        // 上一轮机会投出去，却既没发话也没给 [SILENT]（那一轮报错退出了）：
+        // 过了投递超时就当没发生过，别让 pending 一直挂着。
+        if (st.pending && now.getTime() - st.pending > FIRE_TIMEOUT_MS * 2) st.pending = 0
+        if (record.busy > 0) continue
+        // record.lastActive 是队列层的活动时间：工具直接发消息（qq_reply 之类）也走任务，
+        // 任务结束就会刷新它，所以拿它兜底比只靠 noteOutbound 更准。
+        const lastAt = Math.max(st.lastAt, Number(record.lastActive) || 0)
+        const idleMs = now.getTime() - lastAt
+        if (idleMs < limit) continue
+        // 刚主动过一次：隔开一点，别连珠炮
+        if (st.lastProactiveAt && now.getTime() - st.lastProactiveAt < limit * 1.5) continue
+        const dk = dayKey(now)
+        if (st.dayKey !== dk) {
+          st.dayKey = dk
+          st.count = 0
+        }
+        if (st.count >= quota) continue
+        // 连着几次主动都没人接，就别自说自话了
+        if (st.misses >= MAX_SILENT_MISSES) continue
+        candidates.push({ record, st, silentMin: Math.round(idleMs / 60000) })
       }
-      if (st.count >= quota) continue
-      // 连着几次主动都没人接，就别自说自话了
-      if (st.misses >= MAX_SILENT_MISSES) continue
-      void fire(record, st, Math.round(idleMs / 60000), now)
+
+      // 最久没说话的先开口：同一批冷场里，先轮到真的憋得最久的那个
+      candidates.sort((a, b) => b.silentMin - a.silentMin)
+
+      const opened = candidates.slice(0, MAX_FIRES_PER_TICK)
+      for (let i = 0; i < opened.length; i += 1) {
+        if (stopped) return
+        if (inflight >= MAX_INFLIGHT) {
+          logger.info?.(`[dsh-qq] 主动轮还有 ${inflight} 个没聊完，剩下 ${candidates.length - i} 个下轮再说`)
+          break
+        }
+        const { record, st, silentMin } = opened[i]
+        fire(record, st, silentMin, now)
+        // 口与口之间错开：给上一轮的 agent 调用喘口气，别挤在同一个事件循环里
+        if (i < opened.length - 1) {
+          await sleep(staggerDelay())
+        }
+      }
+      if (candidates.length > opened.length) {
+        logger.info?.(
+          `[dsh-qq] 这一轮有 ${candidates.length} 个会话冷场，先开 ${opened.length} 个口，剩下的下一分钟再排`,
+        )
+      }
+    } finally {
+      ticking = false
     }
   }
 
   function start() {
     if (!stopped) return
     stopped = false
-    timer = setInterval(() => tick(), TICK_MS)
-    timer.unref?.()
     logger.info?.(
       `[dsh-qq] 主动说话已启动：安静 ${Math.round(silentMs() / 60000)} 分钟起，每天最多 ${maxPerDay()} 次，静默时段 ${config?.proactiveQuietHours || '（不限）'}`,
     )
+    // 2026-10-30：三只进程原来都在各自的「整分」上 tick —— 同一秒一起扫、
+    // 一起发现冷场、一起撒口。现在第一次 tick 随机散开 0–55 秒，
+    // 三只的相位就错开了，撞车概率降一个数量级。
+    const phase = Math.floor(Math.random() * Math.max(1, TICK_MS - 5_000))
+    startTimer = setTimeout(() => {
+      startTimer = null
+      if (stopped) return
+      void tick()
+      timer = setInterval(() => tick(), TICK_MS)
+      timer.unref?.()
+    }, phase)
+    startTimer.unref?.()
   }
 
   function stop() {
     stopped = true
+    if (startTimer) clearTimeout(startTimer)
+    startTimer = null
     if (timer) clearInterval(timer)
     timer = null
     states.clear()

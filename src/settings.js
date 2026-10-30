@@ -61,6 +61,7 @@ export const OVERRIDABLE = [
   'privateAllow',
   'botChatEnabled',
   'peerBots',
+  'peerChatMaxTurns',
   // 输出
   'textChunkLimit',
   'showToolResults',
@@ -140,8 +141,12 @@ export function ensureSettingsFile(ctx, logger) {
         '这是 dsh-qq 的设置覆盖文件：只写你想改的键，下面的模板复制进这个对象就能用（把这一行 // 删掉）：\n' +
         '  "wsUrl": "ws://127.0.0.1:3001",\n' +
         '  "accessToken": "你自己的 token",\n' +
-        '  "selfId": "机器人 QQ 号"\n' +
-        '改完保存，约 800ms 自动生效，不用重启宿主。',
+        '  "selfId": "机器人 QQ 号",\n' +
+        '  "privateAllow": ["你的QQ号"]\n' +
+        '改完保存，约 800ms 自动生效，不用重启宿主。\n' +
+        '⚠ privateMode 默认是 allowlist（只有白名单里的人私聊才会被回应），\n' +
+        '  privateAllow 空着就谁都不理——先把自己的号填进上面那行，或者把\n' +
+        '  "privateMode": "open" 也写上（只建议在自己机器上、谁都够不着的时候用）。',
     }
     writeFileSync(file, `${JSON.stringify(skeleton, null, 2)}\n`, 'utf8')
     logger?.info?.(`已生成设置骨架 ${file}（文件不存在时才写，不覆盖已有配置）`)
