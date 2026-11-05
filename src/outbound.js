@@ -705,14 +705,18 @@ export function stripClosingTalk(text) {
  * 只收「说话类」工具；qq_poke / qq_react / qq_like 是互动不是发言，
  * 放进来的话，她点个赞就把正经回话拦掉了。
  */
-const SELF_SENDING_TOOLS = new Set([
+/*const SELF_SENDING_TOOLS = new Set([
   'qq_reply',
   'qq_send',
   'qq_send_image',
   'qq_send_file',
   'qq_face',
   'qq_mface',
-])
+])*/
+// 只有真正把「话」发出去的工具才该在这里。
+// qq_send_image / qq_send_file / qq_face / qq_mface 只发附件，不发正文；
+// 把它们放进来会压掉同一轮后续的纯文本（表现为「发了表情包，配的话不见了」）。
+const SELF_SENDING_TOOLS = new Set(['qq_reply', 'qq_send'])
 
 /**
  * 这一轮是不是「主动机会」（`wake.js` 的 `fire()` 投的 `【主动机会】`）。
