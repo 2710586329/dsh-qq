@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import { extractText, stripLeakedThinking } from '../src/outbound.js'
-import { stripSilentMark } from '../src/prompts.js'
+import { hasSilentMark, stripSilentMark } from '../src/prompts.js'
 
 /**
  * 2026-10-28 12:38 事故：主动机会那一轮，老三只输出「不说」，
@@ -43,7 +43,7 @@ test('正文带 [SILENT] 的三种写法都能被认出来', () => {
 
 test('接线检查：沉默拦截必须排在 stripLeakedThinking 之前', () => {
   const src = readFileSync(new URL('../src/outbound.js', import.meta.url), 'utf8')
-  const idxSilent = src.indexOf('rawText.includes(SILENT_MARKER)')
+  const idxSilent = src.indexOf('hasSilentMark(rawText)')
   const idxStrip = src.indexOf('let text = stripLeakedThinking(rawText)')
   assert.ok(idxSilent > 0, '「正文带 [SILENT] 就整条沉默」那道闸不见了')
   assert.ok(idxStrip > idxSilent, '闸必须在 stripLeakedThinking 前面，否则标记先被剥丢了')
@@ -55,4 +55,18 @@ test('接线检查：沉默拦截必须排在 stripLeakedThinking 之前', () =>
 test('send 层的老兜底还在：整条只有标记时剥成空', () => {
   assert.equal(stripSilentMark('[SILENT]'), '')
   assert.equal(stripSilentMark('  [SILENT]  '), '')
+})
+
+// 2026-11-06 12:28：老大写了中文 `[静默]`，插件只认英文，四个字原样发进了 QQ。
+test('中文别名 [静默] / ［静默］ 也当标记', () => {
+  for (const mark of ['[静默]', '［静默］']) {
+    assert.equal(hasSilentMark(mark), true, `${mark} 应该被认成沉默标记`)
+    assert.equal(stripSilentMark(`不想说了。${mark}`), '不想说了。', '前面的真话留着，标记剥掉')
+  }
+})
+
+test('正文里光有「静默」两个字不算标记', () => {
+  assert.equal(hasSilentMark('静默时段不主动开口'), false)
+  assert.equal(hasSilentMark('她这会儿静默着，等她醒'), false)
+  assert.equal(stripSilentMark('静默时段不主动开口'), '静默时段不主动开口')
 })

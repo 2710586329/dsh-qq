@@ -6,7 +6,7 @@ import { textSegments } from './onebot/segment.js'
 import { SessionManager } from './session.js'
 import { createInbound, historyLine, pushHistory } from './inbound.js'
 import { appendChatLog } from './chatlog.js'
-import { SILENT_MARKER, personaLeaks, stripSilentMark } from './prompts.js'
+import { SILENT_MARKER, hasSilentMark, personaLeaks, stripSilentMark } from './prompts.js'
 import { createOutbound } from './outbound.js'
 import { createBridge } from './bridge.js'
 import { createPin } from './pin.js'
@@ -358,7 +358,7 @@ const pin = createPin({ config, logger })
     // 现在先把标记剥掉：剥完只剩空白＝她选了潜水；还剩话＝照发剩下的。
     const spoken = stripSilentMark(trimmed)
     if (!spoken) {
-      if (trimmed.includes(SILENT_MARKER)) {
+      if (hasSilentMark(trimmed)) {
         logger.info(`[dsh-qq] ${record.label} 选择不接话（${SILENT_MARKER}）`)
         // 沉默不该扣主动开口的额度：机会白给，她想开口的话下次还有（2026-10-26）
         wake.noteProactiveSilent(record)

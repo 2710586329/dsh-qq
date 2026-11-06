@@ -13,7 +13,7 @@ import { listOf } from './config.js'
  *
  * 防打扰四道闸（全部可配）：
  *   1. 静默时段      proactiveQuietHours（默认 23:00-08:00）
- *   2. 每天配额      proactiveMaxPerDay（默认 6 次／会话）
+ *   2. 每天配额      proactiveMaxPerDay（默认 6 次／会话；负数 = 不限次数）
  *                    **只有真发出去才算一次**；她选 [SILENT] 只是白给一次机会，不扣额度
  *                    （2026-10-26：原来投递时就扣，沉默也扣 —— 她越克制额度烧得越快，
  *                      一天 10 次机会被 6 次沉默吃满，下午最该开口时机制已经哑了）
@@ -86,7 +86,13 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
   }
 
   const silentMs = () => Math.max(60_000, Number(config?.proactiveSilentMs) || 1_200_000)
-  const maxPerDay = () => Math.max(0, Number(config?.proactiveMaxPerDay) || 0)
+  // 负数 = 不限次数（2026-10-31 姐姐要的：白天每隔一段时间问一次「要不要搭话，不想说就去看书」，不设上限）。
+  // 节奏还是靠「安静够久」「两次至少隔 1.5 倍」「静默时段」这三道闸管，配额这一层不封顶。
+  const maxPerDay = () => {
+    const raw = Number(config?.proactiveMaxPerDay)
+    if (Number.isFinite(raw) && raw < 0) return Infinity
+    return Math.max(0, raw || 0)
+  }
 
   function stateOf(record) {
     let st = states.get(record.sessionId)
@@ -316,8 +322,9 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
   function start() {
     if (!stopped) return
     stopped = false
+    const quota = maxPerDay()
     logger.info?.(
-      `[dsh-qq] 主动说话已启动：安静 ${Math.round(silentMs() / 60000)} 分钟起，每天最多 ${maxPerDay()} 次，静默时段 ${config?.proactiveQuietHours || '（不限）'}`,
+      `[dsh-qq] 主动说话已启动：安静 ${Math.round(silentMs() / 60000)} 分钟起，${quota === Infinity ? '不限次数' : `每天最多 ${quota} 次`}，静默时段 ${config?.proactiveQuietHours || '（不限）'}`,
     )
     // 2026-10-30：三只进程原来都在各自的「整分」上 tick —— 同一秒一起扫、
     // 一起发现冷场、一起撒口。现在第一次 tick 随机散开 0–55 秒，

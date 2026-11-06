@@ -9,6 +9,7 @@ import { mkdtemp, readdir, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createContextGuard } from '../src/context-guard.js'
+import { createSessionState } from '../src/session-state.js'
 
 const dir = await mkdtemp(join(tmpdir(), 'dsh-qq-guard-'))
 const injected = []
@@ -90,5 +91,70 @@ const guard2 = createContextGuard({
   logger,
 })
 assert.equal(await guard2.maybeSwap(record2), null)
+
+// 8) 轮数线（2026-11-03 三只定的：300 轮换、275 轮提醒写便签）
+const turnsRec = {
+  sessionId: 's3',
+  turns: 0,
+  promptTokens: 0,
+  contextWindow: 100000,
+  busy: 0,
+  agent: { inject: (message) => turnsInjected.push(message) },
+}
+const turnsInjected = []
+const turnsReset = []
+const guard3 = createContextGuard({
+  manager: {
+    find: () => turnsRec,
+    reset: (r) => {
+      turnsReset.push(r.sessionId)
+      return true
+    },
+  },
+  config: { ...config, contextSwapTurns: 300, contextSwapWarnAhead: 25 },
+  logger,
+})
+// 274 轮：还不到线，也不提醒
+turnsRec.turns = 274
+assert.equal(await guard3.maybeSwap(turnsRec), null)
+assert.equal(turnsInjected.length, 0)
+// 275 轮：提醒一次「把便签写足」
+turnsRec.turns = 275
+assert.equal(await guard3.maybeSwap(turnsRec), null)
+assert.equal(turnsInjected.length, 1)
+assert.match(turnsInjected[0].content[0].text, /便签/)
+assert.match(turnsInjected[0].content[0].text, /275/)
+// 280 轮：不再重复提醒
+turnsRec.turns = 280
+await guard3.maybeSwap(turnsRec)
+assert.equal(turnsInjected.length, 1, '提醒只该来一次')
+// 300 轮：真换
+turnsRec.turns = 300
+const seed2 = await guard3.maybeSwap(turnsRec)
+assert.ok(Array.isArray(seed2), '300 轮应换会话并返回 seed')
+assert.deepEqual(turnsReset, ['s3'])
+
+// 9) 轮数落到账本：宿主重启后接着数，不从头来
+const store = createSessionState(join(dir, 'session-state.json'), logger)
+const rec9 = { sessionId: 's9', turns: 0, promptTokens: 0, busy: 0, agent: { inject() {} } }
+const guard9 = createContextGuard({
+  manager: { sessionState: store, find: () => rec9, reset: () => true },
+  config: { ...config, contextSwapTurns: 3, contextSwapWarnAhead: 1 },
+  logger,
+})
+await guard9.maybeSwap(rec9)
+assert.equal(store.turns('s9'), 1)
+rec9.turns = 0 // 模拟重启后内存空了
+await guard9.maybeSwap(rec9)
+assert.equal(store.turns('s9'), 2, '账本里的轮数应接着往上加')
+
+// 10) contextSwapTurns = 0：关掉轮数线，只按 token 换
+const rec10 = { ...turnsRec, sessionId: 's10', turns: 900, promptTokens: 0, turnWarned: false }
+const guard10 = createContextGuard({
+  manager: { find: () => rec10, reset: () => assert.fail('关掉轮数线时不该按轮数换') },
+  config: { ...config, contextSwapTurns: 0 },
+  logger,
+})
+assert.equal(await guard10.maybeSwap(rec10), null)
 
 console.log('context-guard: all checks passed')

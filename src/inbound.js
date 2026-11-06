@@ -1,7 +1,7 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { readMessage } from './onebot/segment.js'
 import { rememberFaces, facesCount, facesForPrompt } from './faces.js'
-import { buildChatPrompt, faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT, SILENT_HINT } from './prompts.js'
+import { buildChatPrompt, faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT, SHORT_RULES, SILENT_HINT } from './prompts.js'
 import { evaluateWakeTrigger, rollWakeProbability } from './wake-trigger.js'
 import { doorLine } from './door.js'
 import {
@@ -122,6 +122,23 @@ const peerChatTurns = new Map()
 /** 连聊计数的有效期：半小时没动静就重新算。半夜聊两句，别让白天的账还挂着。 */
 const PEER_CHAT_TURN_WINDOW_MS = 30 * 60_000
 
+/** 私聊「上次真开了轮」的时间（键：对面）。
+ *  2026-11-06 加：私聊 mustReplyFor 恒 true，连「嗯」都开一整轮；输入信息量太低，模型
+ *  只能自己补一句「她其实想说什么」，补出来的那句就成了回应对象——自我推演的主来源。
+ *  所以：短时间内刚聊过、这句又只是个语气词，就不为它单开一轮，攒着等下一条真的话。 */
+const lastTurnAt = new Map()
+
+/** 「嗯」「哦」「好」这种，单发一条不值得开一轮。 */
+const BARE_ACK =
+  /^(?:嗯+|哦+|啊+|好+|行+|在|哈+|呀|呢|诶|欸|额|呃|对+|是的|ok|okay|好的|好哒|嗯嗯|哦哦|哈哈+|hhh+)$/i
+
+export function isBareAck(text) {
+  const t = String(text ?? '')
+    .trim()
+    .replace(/[。．.~～!！?？,，、…\s]+$/g, '')
+  return t.length > 0 && t.length <= 3 && BARE_ACK.test(t)
+}
+
 /** 每个「群:人」上次回复的时间。用来做「均匀回应」：两条回复之间至少隔 groupReplyGapMs，
  *  间隔里来的消息不丢，攒进 backlog 等下一次一起看见 —— 比「一个窗口只准回 N 次」温和，
  *  也不会跟「窗口内说话续期」打架（用户 2026-10-24 发现的冲突）。 */
@@ -131,6 +148,12 @@ const groupLastReplyAt = new Map()
  *  没有它，「攒着」就是永久沉默 —— 2026-10-25 群 123456789 实况：
  *  @ 回过一句、下一句在 20 秒内被压进 backlog，姐姐不再开口，就再没动静。 */
 const gapReplayTimers = new Map()
+
+/** 已投递过的 message_id：重启重连时协议端会把最近几条重发一遍，同一条会被当成新消息回两次。
+ *  2026-11-04 15:28 实况：一条「抱住揉揉」进来 3 次、一条「今天事有点多」进来 4 次。
+ *  只记 5 分钟、最多 300 条，够了——重发集中在重连后的几秒里。 */
+const seenMessageIds = new Map()
+const DEDUPE_TTL_MS = 5 * 60_000
 
 /** 距上次回复够不够久。0/负数 = 不限，永远够。 */
 function gapReady(config, groupId, userId) {
@@ -248,6 +271,34 @@ function localDay(d = new Date()) {
  *  直接给模型一句能照念的话，别让它拿 ISO 时间戳自己换算白天晚上。 */
 function humanTime(d = new Date()) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${WEEKDAYS[d.getDay()]} ${pad2(d.getHours())}:${pad2(d.getMinutes())}（${periodOf(d.getHours())}）`
+}
+
+/**
+ * 只报「距上一条隔了多久」，不再每句话前面盖一个完整时间戳。
+ *
+ * 2026-11-06 20:20 姐姐定：学 AstrBot 的上下文形状。
+ * 原来每条消息的正文都是两行：`[现在是 2026-11-06 周五 19:12（晚上）]` + `[姐姐] 内容`。
+ * 模型看到的输入永远长这样、自己的输出却是纯文本，于是它把这套信封当成「说话该有的格式」，
+ * 学着往正文里写——老三 19:12 那次就是照着这两行续写了我根本没说过的一句话。
+ * 真人聊天不会每句前面盖章；只有「隔了一阵」才提一句，而且用圆括号，不站在行首的方括号里。
+ * 同一天隔得不久就一个字都不给。
+ */
+export function gapNote(prevAt, now = Date.now()) {
+  if (!prevAt) return `（这会儿是 ${clockOf(now)}）`
+  const gap = now - prevAt
+  if (!Number.isFinite(gap) || gap < 10 * 60 * 1000) return ''
+  const sameDay = new Date(prevAt).toDateString() === new Date(now).toDateString()
+  if (!sameDay) return `（隔了一天了，这会儿是 ${clockOf(now)}）`
+  const mins = Math.round(gap / 60000)
+  if (mins < 60) return `（隔了 ${mins} 分钟）`
+  const hours = Math.round(mins / 60)
+  return hours <= 3 ? `（隔了 ${hours} 个小时）` : `（隔了大半天，这会儿是 ${clockOf(now)}）`
+}
+
+/** 只到小时分钟，不带日期和星期 —— 日期让 gapNote 用「隔了一天」这种方式说。 */
+function clockOf(ts) {
+  const d = new Date(ts)
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
 }
 
 /** 历史行里的短时间：10-24 周六 13:05（下午）。一条消息只占一行，别太长。 */
@@ -569,6 +620,26 @@ export function createInbound({ config, manager, logger, client, send, approval,
     if (event.self_name) manager.selfName = String(event.self_name)
     if (event.user_id !== undefined && String(event.user_id) === selfId) return
 
+    // 2026-11-04 15:35：重启后 ws 重连，协议端会把最近几条重发一遍——
+    // 15:28:13 同一条「抱住揉揉」进来 3 次、15:32:46「今天事有点多」进来 4 次，
+    // 每次都当新消息独立处理，于是同一秒发了两条 `→`（姐姐：「妹妹你在 qq 发了两个消息」）。
+    // 按 message_id 去重：5 分钟内同一个 id 只认第一次。
+    const dedupeId = event.message_id ?? event.message_id_v2
+    if (dedupeId !== undefined && dedupeId !== null) {
+      const key = String(dedupeId)
+      const now = Date.now()
+      if (seenMessageIds.has(key)) {
+        logger.debug?.(`[dsh-qq] 重复投递 ${key}，跳过`)
+        return
+      }
+      seenMessageIds.set(key, now)
+      if (seenMessageIds.size > 300) {
+        for (const [k, t] of seenMessageIds) {
+          if (now - t > DEDUPE_TTL_MS) seenMessageIds.delete(k)
+        }
+      }
+    }
+
     const isGroup = event.message_type === 'group'
     const scope = isGroup ? 'group' : 'private'
     const peerId = String(isGroup ? event.group_id : event.user_id)
@@ -788,7 +859,26 @@ export function createInbound({ config, manager, logger, client, send, approval,
       return
     }
 
+    // ── 私聊：短附和不为它单开一轮（2026-11-06）──
+    // 刚聊过 5 分钟内、这句只是「嗯/哦/好」这种语气词、又没有图没有引用：记进 backlog，
+    // 等下一句真的话一起投。没回合就没有排练场——这是拦「自我推演」最有效的一刀。
+    if (
+      !isGroup &&
+      !isReplay &&
+      !quotedMe &&
+      !info.atMe &&
+      !(info.images?.length > 0) &&
+      !(info.files?.length > 0) &&
+      isBareAck(info.text) &&
+      Date.now() - (lastTurnAt.get(peerId) ?? 0) < 5 * 60_000
+    ) {
+      keepBacklog(peerId, historyLine(sender, info.text || '', ownerInfo))
+      logger.info?.(`[dsh-qq] ${label} 私聊短附和「${info.text}」，不开轮，攒着等下一条`)
+      return
+    }
+
     let record = await manager.obtain({ scope, peerId, label })
+    lastTurnAt.set(peerId, Date.now())
     // 有人说话了：冷场计时要清零，主动说话那层也知道「这会儿不缺人」
     wake?.noteInbound?.(record)
 
@@ -860,6 +950,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
     record.lastSenderId = Number(event.user_id) || record.lastSenderId || null
     record.lastSenderName = senderName
     record.lastMessageId = Number(event.message_id) || record.lastMessageId || null
+    // 先记下「上一条」是什么时候，再更新自己 —— 下面算「隔了多久」要用旧的那个
+    const prevMessageAt = record.lastMessageAt ?? null
     record.lastMessageAt = Date.now()
     if (record.lastSenderName) record.label = label
 
@@ -953,15 +1045,16 @@ export function createInbound({ config, manager, logger, client, send, approval,
     }
 
     // ── 组装交给 agent 的那段文字 ──
+    // 2026-11-06：正文就是话本身。私聊不再加 `[姐姐]` 前缀（这个会话里说话的就她一个，
+    // 消息的 role 已经说明是谁），时间只在「隔了一阵」时用一句圆括号带过。
     const parts = []
-    // 当前时间：每条消息都带在最前面，跟着正文走 —— 会话压缩、历史被裁掉，这行也不会丢
-    parts.push(`[现在是 ${humanTime()}]`)
+    const gap = gapNote(prevMessageAt)
+    if (gap) parts.push(gap)
     if (quoteLine) {
       parts.push(quoteLine, QUOTE_DIRECTION_HINT)
     }
     let head = info.text || ''
     if (isGroup) head = historyLine(sender, info.text || '[图片]', ownerInfo)
-    else if (ownerInfo.isOwner && head) head = `[${ownerLabel}] ${head}`
     if (head) parts.push(head)
 
     // 群聊里没被 @、也不是引用着我的：给一个「可以不接」的出口。
@@ -1038,6 +1131,16 @@ export function createInbound({ config, manager, logger, client, send, approval,
       const chatPrompt = buildChatPrompt(config, {
         isGroup,
         isOwner: ownerInfo.isOwner,
+        // 会话标题靠首行认人（2026-11-03）：优先用配置里的 sessionLabel，
+        // 没配就退回人设文件名（`老二-水仙女.md` → 老二-水仙女）。
+        label: isGroup
+          ? ''
+          : String(config?.sessionLabel ?? '').trim() ||
+            String(config?.personaFile ?? '')
+              .trim()
+              .split(/[\\/]/)
+              .pop()
+              .replace(/\.[^.]+$/, ''),
         faces: facesForPrompt(config, 12),
         facts: loadFactsFor(record),
         factsFile: factsFileFor(record),
@@ -1072,6 +1175,15 @@ export function createInbound({ config, manager, logger, client, send, approval,
       // 宿主重启 / 闲置回收后 record 重建，靠 manager 的账本记住「这个会话注过了」。
       if (typeof manager?.markChatPromptInjected === 'function') manager.markChatPromptInjected(record)
       else record.chatPromptInjected = true
+    } else {
+      // 2026-11-06：规矩只在会话第一条消息里注入过一次，长会话里早被压淡了
+      // （老三那个转接窗口 169 轮 / 1.6M tok，规矩等于没写）。每 25 轮把短版再钉一次，
+      // 只有四行，不占地方——规矩不是没写，是聊着聊着忘了。
+      record.turnsSincePrompt = (record.turnsSincePrompt ?? 0) + 1
+      if (record.turnsSincePrompt >= 25) {
+        record.turnsSincePrompt = 0
+        parts.unshift(...SHORT_RULES, '')
+      }
     }
 
     // 错过睡前提醒的补刀：会话是有人说话才建的，23:30 那一刻内存里可能一个会话都没有，

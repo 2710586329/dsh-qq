@@ -400,7 +400,10 @@ window.__ModuleLoader__.load({
             hint: '默认 1200000（20 分钟）。说完一句话会重新计时，不会隔几分钟又问一遍。',
             type: 'number',
           }),
-          textField('proactiveMaxPerDay', '每天最多主动几次', { hint: '默认 6。连着 3 次没人接就当天闭嘴。', type: 'number' }),
+          textField('proactiveMaxPerDay', '每天最多主动几次', {
+            hint: '默认 6；填 -1 = 不限次数（只受「安静多久」「两次间隔」「静默时段」管，不问够不罢休）。0 = 不主动。连着 3 次没人接就当天闭嘴。',
+            type: 'number',
+          }),
           textField('proactiveQuietHours', '静默时段（这期间不主动）', {
             hint: '默认 23:00-08:00。格式「开始-结束」，24 小时制。',
             mono: true,

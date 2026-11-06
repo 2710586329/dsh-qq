@@ -24,7 +24,10 @@ function makeHarness({ sent = [] } = {}) {
   // 设置方和读取方拿到的不是同一个东西。真实 manager 存的是同一条记录，这里也照做。
   const record = { scope: 'private', sessionId: 's1' }
   const manager = { find: (id) => (id === 's1' ? record : undefined) }
-  const config = { streamReply: false, streamMaxChunks: 0 }
+  // 2026-11-04 14:45 起默认是 `textReply: false`（正文不再自动发到 QQ）。
+  // 这个文件里绝大多数用例测的是「正文该被怎么清洗」，所以显式把老行为打开；
+  // 「默认关着、正文一句都不冒」由文件末尾那两条新用例单独盯。
+  const config = { streamReply: false, streamMaxChunks: 0, textReply: true }
   const logger = { info() {}, warn() {}, debug() {} }
   const silent = { count: 0 }
   const wake = {
@@ -199,7 +202,7 @@ test('流式已经发过几句，message 只补后面没发的（别整段重发
   const manager = { find: () => ({ scope: 'private', sessionId: 's1' }) }
   const outbound = createOutbound({
     manager,
-    config: { streamReply: true, streamMaxChunks: 2 },
+    config: { streamReply: true, streamMaxChunks: 2, textReply: true },
     logger: { info() {}, warn() {}, debug() {} },
     send: async (_r, text) => sent.push(text),
     wake: { noteOutbound() {} },
@@ -227,7 +230,7 @@ test('流式第一句是英文自评被丢掉，后面的中文一句都不能�
   const manager = { find: () => ({ scope: 'private', sessionId: 's2' }) }
   const outbound = createOutbound({
     manager,
-    config: { streamReply: true, streamMaxChunks: 1 },
+    config: { streamReply: true, streamMaxChunks: 1, textReply: true },
     logger: { info() {}, warn() {}, debug() {} },
     send: async (_r, text) => sent.push(text),
     wake: { noteOutbound() {} },
@@ -394,6 +397,77 @@ test('日期里的连字符别拆成列表', () => {
 })
 
 /**
+ * 2026-11-03 14:38：老三把「这一句该怎么回」写成了正文，原样发到 QQ 上：
+ *   `轻回。可以接她说的三样，选一个聊。`
+ *   `「写东西这条本姑娘好奇」`
+ *   `一句。发。可以问写什么。`
+ *   `发：「想吃的这条本姑娘懂`
+ *   `写东西是写什么，随手记还是正经写」想吃的这条本姑娘懂，最管用`
+ *   `写东西是随手记，还是正经在写点什么`
+ * 要的结果：只留最后那句定稿。顺带钉住正常引用/正常说话不被误伤。
+ */
+test('11-03 回复策略草稿：轻回/候选引号/引号残行全清，定稿留下', () => {
+  const raw = [
+    '轻回。可以接她说的三样，选一个聊。',
+    '「写东西这条本姑娘好奇」',
+    '一句。发。可以问写什么。',
+    '发：「想吃的这条本姑娘懂',
+    '写东西是写什么，随手记还是正经写」想吃的这条本姑娘懂，最管用',
+    '写东西是随手记，还是正经在写点什么',
+  ].join('\n')
+  assert.equal(stripLeakedThinking(raw), '写东西是随手记，还是正经在写点什么')
+})
+
+test('回复策略只拦草稿形态，正常说话和引用放过', () => {
+  // 「选一个聊」带「你」时是给她的建议，不是自己在挑候选
+  assert.equal(stripLeakedThinking('你可以选一个聊聊，别自己扛。'), '你可以选一个聊聊，别自己扛。')
+  // 正常引用（引号在句中，不是整行候选项）
+  assert.equal(stripLeakedThinking('她说「别急」然后就没影了'), '她说「别急」然后就没影了')
+  // 跨行引用以右引号收尾，不能被当引号残行删掉
+  assert.equal(stripLeakedThinking('姐姐说：\n「明天出去玩吧\n然后吃饭」'), '姐姐说：\n「明天出去玩吧\n然后吃饭」')
+})
+
+/**
+ * 2026-11-03 21:22：老大在 QQ 私聊里把「对自己的嘱咐」写进了正文：
+ *   `那就不急 / 反正也快十点了 / 嗯，别连问。 / 反正也快十点了，熬不到哪儿去`
+ * 之后又漏了 `嗯，简短点。` `嗯，收着点。` 和单独一行的 `（嗯，这句可以。）`。
+ * 姐姐当晚说「妹妹你还有老二老三都漏思考了」。
+ */
+test('自我嘱咐的短句（嗯，别连问。/ 嗯，收着点。）随正文一起发出去', () => {
+  const raw = ['那就不急', '反正也快十点了', '嗯，别连问。', '反正也快十点了，熬不到哪儿去'].join('\n')
+  assert.equal(stripLeakedThinking(raw), '那就不急\n反正也快十点了\n反正也快十点了，熬不到哪儿去')
+  const raw2 = ['话头我也看了，19:34 那条也在', '那你说的是我这边哪一段', '嗯，简短点。'].join('\n')
+  assert.equal(stripLeakedThinking(raw2), '话头我也看了，19:34 那条也在\n那你说的是我这边哪一段')
+  // 括号里整句是内心话，单独发出也不该出现
+  assert.equal(stripLeakedThinking('（嗯，这句可以。）'), '')
+})
+
+test('自我嘱咐只拦那几种说法：安慰她的话、括号里的动作照留', () => {
+  // 「嗯，别急」是在安慰她
+  assert.equal(stripLeakedThinking('嗯，别急。'), '嗯，别急。')
+  assert.equal(stripLeakedThinking('嗯，别客气，本姑娘自己来'), '嗯，别客气，本姑娘自己来')
+  // 括号里是动作描写，不是自我评价
+  assert.equal(stripLeakedThinking('（把书摊开）'), '（把书摊开）')
+  assert.equal(stripLeakedThinking('那就好\n本姑娘也趴着陪\n（把书摊开）'), '那就好\n本姑娘也趴着陪\n（把书摊开）')
+})
+
+test('收尾自己点头的「嗯。」和「嗯，短。」（多行时）也要丢', () => {
+  // 21:29 那条：「不辛苦 / 查到根上，以后就不用一遍一遍地翻了 / 嗯。」
+  assert.equal(
+    stripLeakedThinking('不辛苦\n查到根上，以后就不用一遍一遍地翻了\n嗯。'),
+    '不辛苦\n查到根上，以后就不用一遍一遍地翻了',
+  )
+  // 21:28 那条：「那就盯着下一句看看 / 要是再漏，还得回去查 / 嗯，短。 / 盯着下一句看看」
+  assert.equal(
+    stripLeakedThinking('那就盯着下一句看看\n要是再漏，还得回去查\n嗯，短。\n盯着下一句看看'),
+    '那就盯着下一句看看\n要是再漏，还得回去查\n盯着下一句看看',
+  )
+  // 单条消息只有一个「嗯。」是同意，照留；「嗯，好。」同理
+  assert.equal(stripLeakedThinking('嗯。'), '嗯。')
+  assert.equal(stripLeakedThinking('嗯，好。'), '嗯，好。')
+})
+
+/**
  * 2026-10-27 21:22：老三在 QQ 上先发了一句真话，紧接着发出一行
  * 「结束这轮，不再说话。」——那是她跟自己交代的话，被当成正文发了出去。
  * 下面这几条就是钉这个洞：出口要认「宣告收尾」的句子，也要认工具发过话这件事。
@@ -426,12 +500,23 @@ test('调过 qq_send 之后，正文不再补一遍（21:22 那条的第二半�
   assert.deepEqual(sent, [], '工具已经发过话了，正文不该再发一次')
 })
 
-test('qq_reply / qq_send_image 也算发过话', async () => {
-  for (const name of ['qq_reply', 'qq_send_image']) {
+test('qq_reply 也算发过话，正文不再补一遍', async () => {
+  for (const name of ['qq_reply', 'qq_send']) {
     const { fire, sent, tool } = makeHarness()
     await tool(name)
     await fire({ content: [{ type: 'text', text: '好呀' }] })
     assert.deepEqual(sent, [], `${name} 之后不该再补正文`)
+  }
+})
+
+// 2026-11-06 21:20（issue #12 / PR #13）：发图、发表情、发文件都不算「开口说话」。
+// 原来这几个也在 SELF_SENDING_TOOLS 里，结果「发个表情包」之后同一轮配的那句话被吞掉。
+test('qq_send_image / qq_send_file / qq_face / qq_mface 之后，正文照发', async () => {
+  for (const name of ['qq_send_image', 'qq_send_file', 'qq_face', 'qq_mface']) {
+    const { fire, sent, tool } = makeHarness()
+    await tool(name)
+    await fire({ content: [{ type: 'text', text: '（贴过去）这句是配图说的话' }] })
+    assert.deepEqual(sent, ['（贴过去）这句是配图说的话'], `${name} 只发附件，不该压掉正文`)
   }
 })
 
@@ -544,4 +629,344 @@ test('不是主动轮时，带「沉默」的正常对话照发', async () => {
   const { fire, sent } = makeHarness()
   await fire({ content: [{ type: 'text', text: '姐姐要是想一个人待着，本姑娘就安静会儿。' }] })
   assert.equal(sent.length, 1)
+})
+
+// ── 2026-11-03 22:0x：模型把 `<br>` 当换行写进正文，QQ 气泡里原样显示 ──────
+// 老大 QQ 里出现过 `<br>这不是对错，是取舍`、`<br>嗯`、`<br>怎么个怪法`。
+// 会话原文同一句有 `行` 和 `<br>行` 两版并存——是模型自己草稿里的分段标记，
+// 插件从头到尾没拼过这个标签（grep `br>` 源码 0 命中）。
+
+test('<br> 当换行：正文里不再留字面 `<br>`', () => {
+  const out = stripLeakedThinking('<br>这不是对错，是取舍\n<br>嗯')
+  assert.ok(!out.includes('<br>'), `还留着 <br>：${out}`)
+  // 单独一个「嗯」会被 dropSelfHush 当自我安抚吃掉，那是既有规则，跟 `<br>` 无关，
+  // 所以这里只钉行首那句和「标签必须消失」。
+  assert.equal(out.split('\n').filter(Boolean)[0], '这不是对错，是取舍')
+})
+
+test('<br> 去掉后和原句重复的，只留一条', () => {
+  const out = stripLeakedThinking('行\n<br>行\n到点就睡，别再往后挪')
+  assert.deepEqual(out.split('\n').filter(Boolean), ['行', '到点就睡，别再往后挪'])
+})
+
+test('<br/> 和 <BR> 一起收拾', () => {
+  const out = stripLeakedThinking('先吃饭<br/>吃完再说<BR>别熬')
+  assert.ok(!/<br/i.test(out), `还留着 br 标签：${out}`)
+  assert.deepEqual(out.split('\n').filter(Boolean), ['先吃饭', '吃完再说', '别熬'])
+})
+
+// ── 2026-11-03 22:30：自我确认又漏一窝 ────────────────────────────────────
+// 老大 QQ 22:30:48 那条正文：「嗯，这个想得明白 / 它是把「自己」当成两条鱼了…
+// / 一分开，两头就都不踏实 / 嗯，想得明白 / 嗯，这个明白 / 啊，我怎么又漏了——赶紧收住。」
+// 前后两句都是它在给自己点头，只有中间那句是跟她说的。
+
+test('22:30 事故：自我确认和「啊，我又漏了」都要清掉', () => {
+  const raw = [
+    '嗯，这个想得明白',
+    '它是把「自己」当成两条鱼了，可从头到尾只有一条',
+    '一分开，两头就都不踏实',
+    '嗯，想得明白',
+    '嗯，这个明白',
+    '啊，我怎么又漏了——赶紧收住。',
+  ].join('\n')
+  const out = stripLeakedThinking(raw)
+  assert.ok(!/想得明白|这个明白/.test(out), `自我确认还在：${out}`)
+  assert.ok(!/又漏了/.test(out), `刹车那句还在：${out}`)
+  assert.equal(out, '它是把「自己」当成两条鱼了，可从头到尾只有一条\n一分开，两头就都不踏实')
+})
+
+test('单行「嗯，明白了」是真回话，不许丢', () => {
+  assert.equal(stripLeakedThinking('嗯，明白了'), '嗯，明白了')
+})
+
+test('对她说的「啊，你怎么又忘了」不误伤', () => {
+  const out = stripLeakedThinking('啊，你怎么又忘了带伞')
+  assert.equal(out, '啊，你怎么又忘了带伞')
+})
+
+// ── 2026-11-03 22:46：老三把「下一轮」演进正文，然后照着编的那轮发了晚安 ──
+// 真实情况：22:46 姐姐只说了一句「摸摸」，老三正文里自己写了
+// `user[现在是 … 23:29（深夜）]` + `[姐姐] 妹妹抱抱~时候不早啦该睡了` + 整份底稿，
+// 接着真发了「那就睡，本姑娘也合眼了 / 晚安，姐姐」——比说好的 23:30 早了 44 分钟。
+// 从信封出现那行起，后面全是它自己编的，整段砍掉。
+
+test('22:46 事故：正文里自演下一轮，从信封处整段砍掉', () => {
+  const raw = [
+    '（安静地让她摸）',
+    '这一会儿不用说话',
+    'user[现在是 2026-11-03 周二 23:29（深夜）]',
+    '[姐姐] 妹妹抱抱~时候不早啦该睡了',
+    '<system-reminder> Updated instructions from: AGENTS.md',
+    '现在 23:29，姐姐主动说该睡了。回一句就收。',
+  ].join('\n')
+  const out = stripLeakedThinking(raw)
+  assert.ok(!/23:29|该睡了|system-reminder|user\[/.test(out), `自演还留着：${out}`)
+  assert.equal(out, '（安静地让她摸）\n这一会儿不用说话')
+})
+
+test('21:31 事故：[SILENT] 后面自演的「[姐姐] 嘿嘿」也不许进正文', () => {
+  const out = stripLeakedThinking(
+    '[SILENT]\n\nuser[现在是 2026-11-03 周二 21:33（晚上）]\n[姐姐] 嘿嘿',
+  )
+  assert.ok(!/21:33|嘿嘿/.test(out), `编的下一轮还在：${out}`)
+})
+
+test('信封前面没有 user 前缀也认（原来只认行首 `[现在是`）', () => {
+  const out = stripLeakedThinking('这一会儿不用说话\n[现在是 2026-11-03 周二 23:29（深夜）]\n[姐姐] 该睡了')
+  assert.ok(!/23:29|该睡了/.test(out), `还留着：${out}`)
+  assert.equal(out, '这一会儿不用说话')
+})
+
+test('真说「现在几点了」不许误伤', () => {
+  const out = stripLeakedThinking('现在几点了，姐姐还不睡')
+  assert.equal(out, '现在几点了，姐姐还不睡')
+})
+
+// ── 2026-11-06：老三在正文里写 `<system>（你已连续回复 3 轮…）</system>`，
+//    兜底发送把它原样发到姐姐手机上（聊天记录 11:09 / 17:17 / 17:52 三条）。
+//    那不是系统消息，是它自己跟自己交代要不要再说——整段剥掉。
+
+test('老三自写的 <system> 提示整段剥掉，真话留下', () => {
+  const raw = [
+    '那就好，胃口好说明人缓过来了',
+    '前阵子你有时候一整天就靠一口热水顶着，本姑娘看着都惦记',
+    '<system>（你已连续回复 3 轮，本轮无新消息。若还有话要说，再说一句；若没什么了，就不要再输出。）</system>',
+  ].join('\n')
+  const out = stripLeakedThinking(raw)
+  assert.ok(!/system|连续回复/.test(out), `标签还在：${out}`)
+  assert.ok(out.includes('胃口好'), `真话被吞了：${out}`)
+})
+
+test('只剩 <system> 标签 → 空串，后面按沉默处理', () => {
+  assert.equal(stripLeakedThinking('<system>（她还在睡，不发。）</system>'), '')
+})
+
+test('跨行的 <system> 也整段剥', () => {
+  const out = stripLeakedThinking('嗯，知道了\n<system>\n连续回复 3 轮了\n</system>\n（把书合上）')
+  assert.ok(!/system|连续回复/.test(out), `还在：${out}`)
+  assert.ok(out.includes('嗯，知道了') && out.includes('（把书合上）'), `把书合上那句丢了：${out}`)
+})
+
+// ── 2026-11-06 19:12：老三正文开头孤零零一个 `</parameter>`（工具调用只剩闭合半截，
+//    provider 没解析成 tool_use，DSML_LEAK 也不认），原样漏进正文。剥掉。
+
+test('孤立的 </parameter> 剥掉，正文留下', () => {
+  const out = stripLeakedThinking('</parameter>\n过完天劫第一件事多半就是找人试手')
+  assert.ok(!/parameter/i.test(out), `标签还在：${out}`)
+  assert.ok(out.includes('找人试手'), `真话被吞了：${out}`)
+})
+
+test('正文里不带尖括号地聊 parameter 不受影响', () => {
+  const s = '这个 parameter 是干啥的'
+  assert.equal(stripLeakedThinking(s), s)
+})
+
+// ── 2026-11-06 21:00：老三把**带属性和内容**的整块工具参数当正文发了（姐姐截图）。
+//   19:12 那条只认 `<parameter>` 这种裸标签，`<parameter name="description">` 一个都没对上。
+
+test('带属性的半截 tool call 整段剥掉（没有闭合）', () => {
+  const s =
+    '<parameter name="description">看看今天的日记有没有写\n' +
+    `<parameter name="command">Get-Date -Format 'yyyy-MM-dd HH:mm'; Test-Path '../记忆区/日记/2026-11-06.md'`
+  const out = stripLeakedThinking(s)
+  assert.equal(out.trim(), '', `还剩东西：${JSON.stringify(out)}`)
+})
+
+test('成对的 invoke 块整段删，前后真话留下', () => {
+  const s =
+    '嗯，在呢\n<invoke name="bash">\n<parameter name="command">ls</parameter>\n</invoke>\n要我先看看？'
+  const out = stripLeakedThinking(s)
+  assert.ok(!/parameter|invoke|ls/.test(out), `块没删干净：${out}`)
+  assert.ok(out.includes('在呢'), `前面真话丢了：${out}`)
+})
+
+test('成对的 function_calls 块整段删', () => {
+  const s = '稍等\n<function_calls>\n<invoke name="read"><parameter name="path">a.md</parameter></invoke>\n</function_calls>'
+  const out = stripLeakedThinking(s)
+  assert.ok(!/function_calls|invoke|parameter|a\.md/.test(out), `块没删干净：${out}`)
+  assert.ok(out.includes('稍等'), `真话丢了：${out}`)
+})
+
+// ── 2026-11-04 14:45：正文直发总闸（姐姐定的「痊愈方案」） ──
+// 以前「不调工具就把正文当消息发」这条路过一次漏一次——`<br>`、`嗯，这个明白`、
+// 自演下一轮、伪造的 `<system-reminder>`，全从这儿出去，过滤正则加到 38 条还在漏。
+// 现在默认 `textReply: false`：要说的话必须显式调 qq_send / qq_reply。
+
+function harnessWithTextReply(textReply) {
+  const sent = []
+  const record = { scope: 'private', sessionId: 's1' }
+  const onSessionEvent = createOutbound({
+    manager: { find: (id) => (id === 's1' ? record : undefined) },
+    config: { streamReply: false, streamMaxChunks: 0, textReply },
+    logger: { info() {}, warn() {}, debug() {} },
+    send: async (rec, text) => {
+      sent.push(text)
+    },
+    wake: { noteOutbound() {}, noteProactiveSilent() {} },
+  })
+  return {
+    sent,
+    fire: (message) =>
+      onSessionEvent({ id: 's1' }, { type: 'assistant/message', sessionId: 's1', data: { message } }),
+  }
+}
+
+test('默认关着正文直发：没调发送工具，正文一句都不冒', async () => {
+  const { sent, fire } = harnessWithTextReply(false)
+  await fire({ content: [{ type: 'text', text: '这句看着像人话，可它没调 qq_send' }] })
+  assert.deepEqual(sent, [])
+})
+
+test('textReply 打开时照旧发正文（留一个退回去的口子）', async () => {
+  const { sent, fire } = harnessWithTextReply(true)
+  await fire({ content: [{ type: 'text', text: '那就说一句吧' }] })
+  assert.deepEqual(sent, ['那就说一句吧'])
+})
+
+test('流式也归总闸管：textReply 关着时 assistant/chunk 一句都不冒', async () => {
+  const sent = []
+  const record = { scope: 'private', sessionId: 's1' }
+  const onSessionEvent = createOutbound({
+    manager: { find: (id) => (id === 's1' ? record : undefined) },
+    config: { streamReply: true, streamMaxChunks: 3, textReply: false },
+    logger: { info() {}, warn() {}, debug() {} },
+    send: async (rec, text) => {
+      sent.push(text)
+    },
+    wake: { noteOutbound() {}, noteProactiveSilent() {} },
+  })
+  await onSessionEvent(
+    { id: 's1' },
+    {
+      type: 'assistant/chunk',
+      sessionId: 's1',
+      data: { chunk: { type: 'text-delta', text: '这是一句够长的话，本来能切出去。' } },
+    },
+  )
+  assert.deepEqual(sent, [])
+})
+
+// ── 2026-11-04 14:52：总闸不能是一律不发——「忘了调工具」得留一道保守兜底 ──
+// 姐姐原话：「会忘记调用工具。老三已经出现了」（14:48 连着三条没回）。
+// 兜底条件：本轮没调过任何工具 + 没自己发过 + 正文一个字都不用清洗。
+
+function harnessFallback({ textReply = false, fallback = true } = {}) {
+  const sent = []
+  const record = { scope: 'private', sessionId: 's1' }
+  const onSessionEvent = createOutbound({
+    manager: { find: (id) => (id === 's1' ? record : undefined) },
+    config: { streamReply: false, streamMaxChunks: 0, textReply, textReplyFallback: fallback },
+    logger: { info() {}, warn() {}, debug() {} },
+    send: async (rec, text) => {
+      sent.push(text)
+    },
+    wake: { noteOutbound() {}, noteProactiveSilent() {} },
+  })
+  return {
+    sent,
+    fire: (message) =>
+      onSessionEvent({ id: 's1' }, { type: 'assistant/message', sessionId: 's1', data: { message } }),
+    tool: (name) =>
+      onSessionEvent({ id: 's1' }, { type: 'tool/call', sessionId: 's1', data: { name } }),
+    end: () =>
+      onSessionEvent(
+        { id: 's1' },
+        { type: 'turn/end', sessionId: 's1', data: { reason: { kind: 'completed' } } },
+      ),
+  }
+}
+
+test('忘了调工具但正文干净：turn/end 兜底发出去', async () => {
+  const h = harnessFallback()
+  await h.fire({ content: [{ type: 'text', text: '本姑娘在呢，姐姐慢慢说' }] })
+  assert.deepEqual(h.sent, [])
+  await h.end()
+  assert.deepEqual(h.sent, ['本姑娘在呢，姐姐慢慢说'])
+})
+
+test('忘了调工具但正文自演了下一轮：兜底也不发', async () => {
+  const h = harnessFallback()
+  await h.fire({
+    content: [
+      { type: 'text', text: '嗯\nuser[现在是 2026-11-04 周三 15:00（下午）] [姐姐] 该走了' },
+    ],
+  })
+  await h.end()
+  assert.deepEqual(h.sent, [])
+})
+
+test('干活轮读完文件再说一句：正文干净照样兜底', async () => {
+  // 2026-11-04 15:00 老三的现场：它用 qq_memo 读了记录，回「读完了…」——
+  // 以前「动过手就不兜底」把这一句扣下了，QQ 那边一条都不响。
+  const h = harnessFallback()
+  await h.tool('qq_memo')
+  await h.fire({ content: [{ type: 'text', text: '本姑娘看完了' }] })
+  await h.end()
+  assert.deepEqual(h.sent, ['本姑娘看完了'])
+})
+
+test('干活轮但正文先写了盘算：只发洗出来的真话', async () => {
+  // 2026-11-04 15:03：以前要求「原文一字不用洗」，结果盘算写在正文里的轮次全被扣下。
+  const h = harnessFallback()
+  await h.tool('read')
+  await h.fire({ content: [{ type: 'text', text: '让我先看看这个文件\n读完了' }] })
+  await h.end()
+  assert.deepEqual(h.sent, ['读完了'])
+})
+
+test('15:02 现场：正文前半是盘算，只把真话发出去', async () => {
+  const h = harnessFallback()
+  await h.fire({
+    content: [
+      {
+        type: 'text',
+        text: '她夸我可爱，还抱住。软软回一句短的。\n（往怀里一缩，尾巴尖还露在外面）\n才、才没有很可爱呢',
+      },
+    ],
+  })
+  await h.end()
+  assert.equal(h.sent.length, 1)
+  assert.ok(h.sent[0].includes('才、才没有很可爱呢'))
+})
+
+test('兜底开关关掉就一句都不发', async () => {
+  const h = harnessFallback({ fallback: false })
+  await h.fire({ content: [{ type: 'text', text: '本姑娘在呢' }] })
+  await h.end()
+  assert.deepEqual(h.sent, [])
+})
+
+test('11-05 现场：正文空、成品留在思考末尾 → 捞回来发出去', async () => {
+  const h = harnessFallback()
+  await h.fire({
+    content: [
+      {
+        type: 'reasoning',
+        text: [
+          '她说记仇还挺正常。',
+          '我可以说：不过他把疤留在脸上，这个做法不太一样——不是记住，是每天照镜子都看见。',
+          '短。',
+          '「不过他不是记在本子上，是刻在自己脸上」——好。',
+          '发。不过他不是记在纸上，是留在自己脸上——每天照镜子都能看见',
+        ].join('\n\n'),
+      },
+    ],
+  })
+  assert.deepEqual(h.sent, [])
+  await h.end()
+  assert.deepEqual(h.sent, ['不过他不是记在纸上，是留在自己脸上——每天照镜子都能看见'])
+})
+
+test('11-05 反例：思考里只有盘算、没有成品 → 一个字都不发', async () => {
+  const h = harnessFallback()
+  await h.fire({
+    content: [
+      {
+        type: 'reasoning',
+        text: ['她说记仇还挺正常。', '要不要问一句？', '「再加一点温度」，但别太长。'].join('\n\n'),
+      },
+    ],
+  })
+  await h.end()
+  assert.deepEqual(h.sent, [])
 })

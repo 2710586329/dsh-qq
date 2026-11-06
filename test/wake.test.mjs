@@ -206,6 +206,25 @@ function makeConfig(over = {}) {
   w.stop()
 }
 
+// 6b) 负数配额 = 不限次数（2026-10-31 姐姐要的：白天每隔一段时间问一次
+//     「要不要搭话，不想说就去看书」，不设上限；节奏只由安静时长和间隔管）
+{
+  const r = fakeRecord('不限次', 60 * 60 * 1000)
+  const m = fakeManager([r])
+  const w = createWake({ config: makeConfig({ proactiveMaxPerDay: -1 }), manager: m, logger: {} })
+  w.start()
+  w.tick()
+  await new Promise((r2) => setTimeout(r2, 10))
+  w.noteProactiveDelivered(r) // 第一次真发出去
+  w.tick(new Date(Date.now() + 31 * 60_000))
+  await new Promise((r2) => setTimeout(r2, 10))
+  w.noteProactiveDelivered(r) // 第二次真发出去
+  w.tick(new Date(Date.now() + 62 * 60_000))
+  await new Promise((r2) => setTimeout(r2, 10))
+  check('负数配额不封顶', m.fired, ['不限次', '不限次', '不限次'])
+  w.stop()
+}
+
 // ── 多个会话同时冷场：别一起打出去（2026-10-30 加）──
 // 19:40 那一轮，三只各自 2–3 个 peer 同时冷场，同一秒 void 出去 8 个 agent 调用，
 // 三只处理链一起堵死。现在改成：先收齐候选、最久的先开、一轮最多 2 个口、剩下的下一轮。

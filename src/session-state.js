@@ -16,19 +16,20 @@ import { dirname } from 'node:path'
  * 键在、id 对，重启才不会退回老会话，也不用每次都重开一个空壳。
  */
 export function createSessionState(file, logger) {
-  let data = { gens: {}, sessions: {} }
+  let data = { gens: {}, sessions: {}, turns: {} }
   try {
     if (file && existsSync(file)) {
       const raw = JSON.parse(readFileSync(file, 'utf8'))
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
         if (raw.gens && typeof raw.gens === 'object') data.gens = raw.gens
         if (raw.sessions && typeof raw.sessions === 'object') data.sessions = raw.sessions
+        if (raw.turns && typeof raw.turns === 'object') data.turns = raw.turns
       }
     }
   } catch (err) {
     // 账本坏了就当全新的：gen 回 0、id 走 hash。宁可重来一次，也别把人钉在坏账上。
     logger?.warn?.('[dsh-qq] 读会话账本失败，重置为初始状态:', err?.message ?? err)
-    data = { gens: {}, sessions: {} }
+    data = { gens: {}, sessions: {}, turns: {} }
   }
 
   const save = () => {
@@ -69,6 +70,27 @@ export function createSessionState(file, logger) {
     forgetSession(key) {
       if (!key || !(key in data.sessions)) return
       delete data.sessions[key]
+      save()
+    },
+    /**
+     * 这一代聊了多少轮（投递出去的轮数，不是原话条数）。
+     * 2026-11-03 姐姐让三只定「多少轮自动换海洋」时加的：内存计数扛不过重启，
+     * 落盘之后宿主重启也能接着数，不会每重启一次就把 300 轮从头算。
+     */
+    turns(sessionId) {
+      const n = Number(data.turns[String(sessionId)])
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+    },
+    setTurns(sessionId, turns) {
+      if (!sessionId) return
+      const n = Number(turns)
+      if (!Number.isFinite(n) || n <= 0) delete data.turns[String(sessionId)]
+      else data.turns[String(sessionId)] = Math.floor(n)
+      save()
+    },
+    forgetTurns(sessionId) {
+      if (!sessionId || !(String(sessionId) in data.turns)) return
+      delete data.turns[String(sessionId)]
       save()
     },
     all() {

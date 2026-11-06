@@ -123,6 +123,11 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
   function noteToolSent(record, text) {
     const said = String(text ?? '').trim()
     if (!said) return
+    // 2026-11-06 21:05 看门狗误报的根：工具发出去的话一条日志都不写。
+    // 写「→」的只有 index.js 里 send() 那条兜底路，于是 qq_send / qq_reply / qq_face 发完，
+    // 日志里最后一条还停在「← 收信」——看门狗 10 分钟后当卡住报警，姐姐手机里其实早收到了。
+    // 这里补一行同格式的流水，看门狗和人都能看见「真的发出去了」。
+    logger?.info?.(`→ ${record.label}: ${said.slice(0, 60)}`)
     try {
       wake?.noteProactiveDelivered?.(record)
       noteSelfSaid?.(record, said)
@@ -839,7 +844,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     parameters: {
       type: 'object',
       properties: {
-        text: { type: 'string', description: '要发的正文' },
+        text: { type: 'string', description: '要发的正文。动作和神态一起写进来——「（尾巴绕了一圈）」这类括号动作是这条消息的一部分，只写在正文里会丢' },
         message_id: { type: 'integer', description: '可选：要引用的那条消息 id' },
       },
       required: ['text'],
@@ -895,11 +900,12 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
       '发一条普通消息（不带引用）。' +
       '不填 to 就发给「当前正在跟你说话的人/群」；' +
       '填 to 可以主动发给别人，格式 `user:123456` 或 `group:987654`（群号）。' +
-      '想接某句话用 qq_reply，只想说点什么用这个。',
+      '想接某句话用 qq_reply，只想说点什么用这个。' +
+      '**发完这句之后，这一轮的正文不要再重复它**——话已经出去了，正文再写一遍会让人觉得你在复读；要静就写 [SILENT]。',
     parameters: {
       type: 'object',
       properties: {
-        text: { type: 'string', description: '要发的正文' },
+        text: { type: 'string', description: '要发的正文。动作和神态一起写进来——「（尾巴绕了一圈）」这类括号动作是这条消息的一部分，只写在正文里会丢' },
         to: { type: 'string', description: '可选：`user:<QQ号>` 或 `group:<群号>`；不填=当前会话' },
       },
       required: ['text'],
@@ -945,6 +951,19 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
         targetLabel = to
       }
 
+      // 2026-11-06 20:35 姐姐定：同一句话 5 秒内不再发第二遍。
+      // 现场是老大 18:45:51 —— 调完 qq_send 之后把同一句又写进正文，
+      // 接着 1 秒后又调了一次 qq_send，姐姐手机上就出现两条一模一样的话。
+      // 插件这边此前对「这一句刚发过」没有任何记忆，第二次照样发出去；
+      // 拦在工具口最省事，也不用去动 turn/end 那套兜底。
+      const lastSend = record._lastSend
+      if (lastSend && lastSend.text === text && Date.now() - lastSend.at < 5000) {
+        logger.info?.(
+          `[dsh-qq] qq_send 同一句话 5 秒内重复，跳过（${text.slice(0, 12)}…）`,
+        )
+        return { ok: true, messageId: lastSend.messageId, target: targetLabel }
+      }
+
       try {
         const result = await client.call(action, {
           ...target,
@@ -952,6 +971,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
         })
         const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
         if (sentId > 0) record.lastSentMessageId = sentId
+        record._lastSend = { text, at: Date.now(), messageId: sentId }
         noteToolSent(record, text)
         return { ok: true, messageId: sentId, target: targetLabel }
       } catch (err) {

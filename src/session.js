@@ -130,6 +130,8 @@ export class SessionManager {
     // 上一代那笔账划掉：reset 之后是全新的 sessionId，老 sessions 记录也不会再用上
     this.injectState.forget(current.sessionId)
     this.sessionState.forgetSession(current.key)
+    // 轮数跟着这一代走：换了新会话就从 0 开始数，别把上一段的 300 轮带过去
+    this.sessionState.forgetTurns?.(current.sessionId)
     this.logger.info?.(`[dsh-qq] 重置会话 ${current.label}（gen → ${this.#gens.get(baseKey) ?? 0}）`)
     return true
   }
@@ -165,7 +167,15 @@ export class SessionManager {
     // ⭐ 2026-10-26：先看账本里这一代真正用的 id（换壳兜底过就跟 hash 推出来的不一样），
     // 没有再退回 hash。只用 hash 的话，重启后永远找不着正在聊的那个壳，只会再开一个空的。
     const derived = deriveSessionId(key)
-    const sessionId = this.sessionState.sessionId(key) || derived
+    const recordedId = this.sessionState.sessionId(key)
+    // ⭐ 2026-11-04：换代（/reset 过）之后不许再用 hash 推出来的 id。
+    // hash 是确定性的，同一代算两次永远是同一个值；而那个值可能几天前就被建过
+    // ——2026-11-03 22:41 那次 /reset 就把 gen 推到 1、算回了 11-02 08:53 建的
+    // `19d53d05`，于是不是新开会话，而是接回了一个旧壳，我今早把 11-04 当成 11-03 就是它。
+    // 所以：账本里没记过这一代用的 id 时，自己起一个带随机尾巴的新 id，从根上不撞历史。
+    const sessionId =
+      recordedId ||
+      (gen > 0 ? `${derived}-r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` : derived)
     const cached = this.#records.get(sessionId)
     if (cached) {
       cached.lastActive = Date.now()
@@ -175,8 +185,12 @@ export class SessionManager {
     const attached = await this.#attach(sessionId, { scope, peerId, label })
     // #attach 可能换了 id（磁盘上留了恢复不出来的空壳会话时），以它实际用的为准
     const actualId = attached.sessionId ?? sessionId
-    // 换过壳就记下：下一次重启直接接回这个壳，不再傻乎乎去找那个恢复不了的老 id
-    if (actualId !== derived) this.sessionState.setSessionId(key, actualId)
+    // 换过壳就记下：下一次重启直接接回这个壳，不再傻乎乎去找那个恢复不了的老 id。
+    // 2026-11-04 14:56 改成**每次都写**：老三 14:47 重启时账本里没有 `-rmw1gvjvw`，
+    // 于是按「换代起随机 id」又新开了一个，它丢了 09:57–14:46 那一段。
+    // 账本必须是唯一真相，不能只在「换壳」这个条件下才落地。
+    this.sessionState.setSessionId(key, actualId)
+    this.logger.debug?.(`[dsh-qq] 账本 ${key} → ${actualId.slice(0, 8)}…`)
     const record = {
       sessionId: actualId,
       key,

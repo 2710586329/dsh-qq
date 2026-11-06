@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 
 import {
   buildChatPrompt,
+  hasSilentMark,
   personaLeaks,
   stripSilentMark,
   SELF_KNOWN_RULE,
@@ -17,6 +18,7 @@ import {
   BUILTIN_RULES,
   GROUP_RULES,
   PRIVATE_RULES,
+  privateRules,
 } from '../src/prompts.js'
 
 let pass = 0
@@ -148,6 +150,27 @@ t('私聊用 PRIVATE_RULES、群聊用 GROUP_RULES', () => {
   assert.ok(grp.includes(GROUP_RULES.slice(0, 12)))
 })
 
+// 2026-11-03：桌面端会话标题是从注入消息首行截的，三只的私聊标题原本一模一样
+//（「【私聊】 - 这是两个人的对话」），姐姐在列表里分不清谁是谁。
+console.log('会话标题 · label')
+t('privateRules 带 label 时首行换成【私聊·xxx】', () => {
+  const text = privateRules('老二·水仙女')
+  assert.ok(text.startsWith('【私聊·老二·水仙女】'), text.slice(0, 30))
+  assert.ok(text.includes('- 这是两个人的对话'), '规矩正文不能丢')
+})
+
+t('不带 label 退回老样子【私聊】', () => {
+  assert.ok(privateRules('').startsWith('【私聊】'))
+  assert.ok(privateRules().startsWith('【私聊】'))
+})
+
+t('buildChatPrompt 传 label：私聊首行带名字，群聊不带', () => {
+  const priv = buildChatPrompt({ persona: PERSONA }, { isGroup: false, label: '老三·梅洛' })
+  assert.ok(priv.startsWith('【私聊·老三·梅洛】'), priv.slice(0, 30))
+  const grp = buildChatPrompt({ persona: PERSONA }, { isGroup: true, label: '老三·梅洛' })
+  assert.ok(grp.startsWith('【群聊】'), grp.slice(0, 30))
+})
+
 console.log('两层提示词 · 自定义补充')
 t('groupPrompt 落在人设之前', () => {
   const p = buildChatPrompt(
@@ -172,6 +195,19 @@ t('没有标记的正文原样留着', () => {
   assert.equal(stripSilentMark('姐姐晚安'), '姐姐晚安')
   assert.equal(stripSilentMark(''), '')
   assert.equal(stripSilentMark(undefined), '')
+})
+
+t('中文写法 [静默] / ［静默］ 也剥掉（2026-11-06 12:28 那条）', () => {
+  assert.equal(stripSilentMark('[静默]'), '')
+  assert.equal(stripSilentMark('［静默］'), '')
+  assert.equal(stripSilentMark('不想说了。[静默]'), '不想说了。')
+  assert.equal(hasSilentMark('[静默]'), true)
+  assert.equal(hasSilentMark('[SILENT]'), true)
+})
+
+t('「静默」两个字不带括号时不算标记', () => {
+  assert.equal(hasSilentMark('静默时段不主动开口'), false)
+  assert.equal(stripSilentMark('静默时段不主动开口'), '静默时段不主动开口')
 })
 
 console.log(`\n${fail === 0 ? '全部通过 🎉' : '有失败'}  ${pass}/${pass + fail}`)

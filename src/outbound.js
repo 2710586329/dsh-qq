@@ -19,7 +19,7 @@ function pickSession(args) {
 }
 
 import { markDoorRead } from './door.js'
-import { SILENT_MARKER } from './prompts.js'
+import { SILENT_MARKER, findSilentMark, hasSilentMark } from './prompts.js'
 
 /**
  * 从 `tool/call` 里捞 read 的文件路径。各家字段名不一样（`input` / `arguments` / `args`，
@@ -62,8 +62,20 @@ export function extractText(message) {
   return out.trim()
 }
 
-/** 句子边界：中文句号/问号/叹号/省略号，以及换行。 */
-const SENTENCE_END = /^([\s\S]*?[。！？!?…\n])/
+/**
+ * 2026-11-05 20:20 事故：老三那轮把工具调用标记当正文吐出来了——
+ * 正文整条是 `</| | DSML | parameter></| | DSML | invoke></| | DSML | calls>`。
+ * provider 没把它解析成 tool_use，它就是一个纯 text 块：`hasToolUse` 看不出来，
+ * 于是被当正文发到了 QQ。
+ * 凡是正文里漏出 DSML 标记的，一律当「这轮其实是工具调用」整条不发。
+ */
+const DSML_LEAK = /DSML|<\s*\/?\s*\|\s*\|/i
+
+export function looksLikeLeakedToolMarkup(text) {
+  return DSML_LEAK.test(String(text ?? ''))
+}
+
+/** 句子边界：中文句号/问号/叹号/省略号，以及换行。 */const SENTENCE_END = /^([\s\S]*?[。！？!?…\n])/
 
 /**
  * 模型偶尔把「想一想再改一版」的过程写进正文（不是 reasoning channel）。
@@ -89,6 +101,46 @@ const LEAK_LINE = [
   // 同款不带引号的：`遗书 language.`
   /^[^\s"'」』”’]{1,16}\s+(?:language|lang|style|tone|wording)\s*\.?\s*$/i,
 ]
+
+/**
+ * 2026-11-03 21:22：老大在 QQ 里把「对自己的嘱咐」写进了正文：
+ *   `那就不急 / 反正也快十点了 / 嗯，别连问。 / 反正也快十点了，熬不到哪儿去`
+ * 之后又漏了 `嗯，简短点。` `嗯，收着点。` 和单独一行的 `（嗯，这句可以。）`。
+ * 这种句子极短、没有「你」、以「嗯，」起头，说的是「我怎么发」而不是「我要说的事」。
+ * 但 `嗯，别急。` `嗯，别客气。` 是**真在安慰她**——所以要分两种：
+ *   ① 括号包着的（`（嗯，这句可以。）`）：括号里就是内心话，整句丢；
+ *   ② 裸写的：只在**多行正文**里丢（单行时它可能就是一句完整的安慰话），
+ *      而且「别客气 / 别担心 / 别急 / 别怕」一律放过。
+ */
+const SELF_HUSH_BRACKET_RE = /^[（(]\s*嗯[，,][^）)]{2,14}[）)]$/
+const SELF_HUSH_RE =
+  /^嗯[，,]\s*(?:别|收|简短|短|慢|快|停|稳住|少说|多说|这句|这样就)[^你]{0,10}[。.！!]?$/
+// 2026-11-03 22:30 又漏一窝：搞明白一件事之后它给自己点头——
+//   `嗯，这个想得明白` / `嗯，想得明白` / `嗯，这个明白`
+// 这是「我懂了」，不是「跟你说我懂了」；真回话会说「嗯，我明白了」或者带「你」。
+// 仍然只在多行正文里丢：单行一个「嗯，明白了」是正常对答。
+const SELF_CONFIRM_RE =
+  /^嗯[，,]?\s*(?:这个|那个|这|那)?(?:想得明白|想明白|想清楚了|想清楚|明白了|明白|懂了|通透了)[。.！!…]?$/
+// `啊，我怎么又漏了——赶紧收住。`：发现自己在漏、现场给自己刹车。
+// 这是它的 OODA 不是话；但怕误伤「啊，你怎么又忘了」，排除带「你」的。
+const SELF_CATCH_RE = /^啊[，,！!]?[^你]{0,24}(?:又漏|漏了|漏出来|又冒)[^你]{0,24}(?:收住|打住|停住|收着|别漏)/
+// 21:29 又漏了一种：整条最后单独一行 `嗯。`——正文说完，它给自己点个头。
+// 单条消息只有一个「嗯。」是同意（她本人也会这么回），所以同样只在多行里丢。
+const SELF_HUSH_BARE_RE = /^嗯[。.，,]?$/
+const POLITE_HUSH_RE = /^[（(]?\s*嗯[，,]\s*别(?:客气|担心|急|怕)/
+
+function dropSelfHush(lines) {
+  const multi = lines.filter(Boolean).length >= 2
+  return lines.map((line) => {
+    const t = String(line ?? '').trim()
+    if (!t) return line
+    if (POLITE_HUSH_RE.test(t)) return line
+    if (SELF_HUSH_BRACKET_RE.test(t)) return null
+    if (multi && (SELF_HUSH_RE.test(t) || SELF_HUSH_BARE_RE.test(t))) return null
+    if (multi && (SELF_CONFIRM_RE.test(t) || SELF_CATCH_RE.test(t))) return null
+    return line
+  })
+}
 
 /**
  * 行首那一串英文小标签（`Good.` `2 lines.` `Hmm `）是模型的自评，不是话。
@@ -126,12 +178,43 @@ function looksSelfReview(line) {
  * 只认这两种信封形状 + 独占一行的长度上限，正文里正常用方括号的话不受影响。
  */
 const CONTEXT_ECHO_RE = new RegExp(
-  '^(?:' +
+  // 2026-11-03 22:46 老三写成了 `user[现在是 …]`——前面多一个 user 前缀，原来认不出。
+  '^(?:(?:user|User|USER)\\s*)?(?:' +
     '\\[现在是[^\\]]{2,40}\\]' + // 时间信封
     '|\\[(?:姐姐|主人)\\]' + // 私聊里主人/姐姐的信封标签
     '|\\[(?:群友|群友\\d+)\\s[^\\]]{0,20}\\]' + // 群聊 historyLine 的信封标签
     ')\\s*[^\\n]{0,80}$',
 )
+
+/**
+ * 2026-11-03 22:46 老三把「下一轮的输入」整段演进了正文，然后照着自己编的那轮真发了晚安：
+ *   `（安静地让她摸）` / `这一会儿不用说话`
+ *   `user[现在是 2026-11-03 周二 23:29（深夜）]`
+ *   `[姐姐] 妹妹抱抱~时候不早啦该睡了`
+ *   `<system-reminder> Updated instructions from: AGENTS.md …`（整份底稿）
+ * 21:31 也有一次：`[SILENT]` 后面跟着 `user[现在是 … 21:33（晚上）]` + `[姐姐] 嘿嘿`，
+ * 而「嘿嘿」她根本没说过，也是编的。
+ * 这类信封是 DSH 塞给它的**输入**，正文里一出现就说明它在续写下一轮，
+ * 从这一行往后全是幻觉——整段砍掉，不是只丢这一行（只丢一行，后面「[姐姐] 该睡了」
+ * 还会留下，它就会照着那句继续演）。`[姐姐]` 单独出现由 CONTEXT_ECHO_RE 整行丢。
+ */
+const SCRIPT_REPLAY_RE =
+  /^(?:>\s*)?(?:[A-Za-z]{0,6}\s*)?(?:\[\s*现在是\s*(?:19|20)\d\d[-年]|<system-reminder>)/i
+
+/**
+ * 2026-11-04 23:50（姐姐定 B）：把「同一行里续写的信封」也砍掉。
+ * SCRIPT_REPLAY_RE 带 `^`，只认行首；可模型常把信封跟真话挤在一行
+ * （`…真话 [现在是 2026-11-04 周三 22:20（晚上）] [姐姐] 嗯呢`），按行切不掉。
+ * 返回第一个信封起点之前的原文；没有信封就原样返回。
+ */
+export function cutAtScriptReplay(text) {
+  const s = String(text ?? '')
+  const lines = s.split('\n')
+  const i = lines.findIndex((line) => SCRIPT_REPLAY_RE.test(line.trim()))
+  let out = i < 0 ? s : lines.slice(0, i).join('\n')
+  const inline = out.search(/\[\s*现在是\s*(?:19|20)\d\d[-年]|<system-reminder>/i)
+  return inline >= 0 ? out.slice(0, inline) : out
+}
 
 /**
  * 2026-10-29 18:28 老二私聊又漏了一次，这次是**英文改稿标签**漏进正文：
@@ -380,6 +463,11 @@ function dedupeLines(lines) {
  */
 function repairShape(text) {
   return String(text)
+    // 2026-11-03 22:00 前后：老大的正文草稿里开始拿 HTML 换行当分段标记，
+    // QQ 是纯文本，气泡里就出现字面 `<br>这不是对错，是取舍`。
+    // 会话原文里 `行` / `<br>行` 两种写法并存，说明是模型自己加的，不是插件拼的。
+    // 先换回真换行，后面的 dedupeLines 才能认出重复行、`<br>` 才不会顶在行首。
+    .replace(/<br\s*\/?>/gi, '\n')
     .replace(/^[ \t]*#{1,6}[ \t]+/gm, '')
     .replace(/(?<=[\u4e00-\u9fa5」』）】…])[ \t]*-[ \t]+(?=[\u4e00-\u9fa5「『（【])/g, '\n- ')
 }
@@ -404,6 +492,13 @@ const TOOL_NAME_RE =
   /\b(?:glob|grep|qq_send|qq_reply|file_search|todo_write|subagent|bash|pwsh)\b/i
 const WILDCARD_FILE_RE = /\*[^*\s]{0,24}\.(?:md|mjs|js|json|yml|yaml|txt|log|py|ts|docx|xlsx)\b/i
 const SELF_TALK_RE = /(?:再?发一句|说一句就够|一句[。.，,]?\s*发|那我?就发|先发一句)/
+// 2026-11-03 14:38 老三把「这一句该怎么回」当正文发了出来：
+//   `轻回。可以接她说的三样，选一个聊。`
+//   `「写东西这条本姑娘好奇」`
+// 这是它在给自己排回复方案，不是话。`轻回 / 快回` 只认行首（正文里几乎不会这么起头），
+// 「选一个聊 / 接她说的」只在短句且没有「你」时算——`你可以选一个聊聊` 那种真话要放过。
+const REPLY_PLAN_HEAD_RE = /^(?:轻回|快回|慢回|短回)/
+const REPLY_PLAN_WORD_RE = /(?:选一个聊|挑一个聊)/
 const PLAN_OPEN_RE =
   /^(?:让我|我先|我也可以|其实为了|合适做|要不要|那我就|那先|先来|先(?:glob|read|看|查|翻|列|写|发)|好[，,]?\s*一句|更新便签|写新的|改便签)/
 const PLAN_OBJECT_RE = /(?:glob|便签|信|门口|日志|目录|文件|工具|聊天记录|记忆区|词典|读|写|查|翻|列|扫|调)/
@@ -437,6 +532,11 @@ export function looksPlanning(line) {
   if ((t.match(/\.(?:md|mjs|js|json|yml|yaml|txt|log)\b/g) ?? []).length >= 2) return true
   const shortAndNoYou = t.length <= 40 && !t.includes('你')
   if (shortAndNoYou && PLAN_OPEN_RE.test(t) && PLAN_OBJECT_RE.test(t)) return true
+  // 2026-11-03 14:38：回复策略写成了正文（`轻回。可以接她说的三样，选一个聊。`）。
+  if (REPLY_PLAN_HEAD_RE.test(t)) return true
+  if (shortAndNoYou && REPLY_PLAN_WORD_RE.test(t)) return true
+  // `发：「想吃的这条本姑娘懂`——行首一个「发：」后面跟候选，是草稿清单的条目。
+  if (t.length <= 60 && /^发[：:]/.test(t)) return true
   // 「读 便签.md。」「拆 门口/那封.md」——中文动词 + 空格 + 文件名，是在点工具参数。
   if (CMD_FILE_RE.test(t)) return true
   // 同一个动作换成英文写（`read 便签.md`），08:40:47 就是这么漏的。
@@ -457,7 +557,41 @@ export function looksPlanning(line) {
 
 export function stripLeakedThinking(text) {
   if (!text) return text
-  const kept = repairShape(text).split('\n').map((line) => {
+  // 模型自己写的「系统提示」（2026-11-06 老三）：它在正文里输出了
+  // `<system>（你已连续回复 3 轮，本轮无新消息…）</system>`——那不是话，是它跟自己
+  // 交代要不要再说。整段剥掉（可能跨行），孤立的开合标签也一并去掉；
+  // 剥完剩下真话照常发，只剩标签就成空串、后面按沉默处理。
+  text = String(text)
+    .replace(/<system>[\s\S]*?<\/system>/gi, '')
+    .replace(/<\/?\s*system\s*>/gi, '')
+  // 2026-11-06 19:12 老三那轮开头孤零零一个 `</parameter>`：provider 没把它解析成
+  // tool_use，它就是一个纯 text 块，DSML_LEAK 又不认（没有 DSML 前缀），于是当正文发出去。
+  // 只剥这几个已知的工具/调用标签，正文里不带尖括号地提到这些词不受影响。
+  //
+  // 2026-11-06 21:00 补（老三又一次，姐姐截图）：这回是**带属性 + 带内容**的整块参数，
+  //   `<parameter name="description">看看今天的日记有没有写`
+  //   `<parameter name="command">Get-Date -Format 'yyyy-MM-dd HH:mm'; Test-Path '…'`
+  // 上面那条只认 `parameter>` 这种光秃秃的标签，`parameter name="…">` 一个都没对上，
+  // 于是工具参数原样发到了聊天里。现在按块剥：
+  //   ① 成对的 tool-call 块（含里面的内容）整段删；
+  //   ② 只开了没闭的（provider 截断过），从那个开标签所在行一直删到结尾——
+  //      参数值是多行的，逐个标签删不干净，剩下的半截命令比丢掉一句更难看；
+  //   ③ 最后再把残留的裸标签剥一遍（原来那条）。
+  text = text
+    .replace(/<\s*(function_calls|invoke|parameter)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+    .replace(/^[^\S\n]*<\s*(?:function_calls|invoke|parameter|antml:[a-z_]+)\b[^>]*>[\s\S]*$/gim, '')
+  text = text.replace(/<\/?\s*(?:parameter|invoke|function_calls|function|antml:[a-z_]+)\s*>/gi, '')
+  // 自演下一轮（22:46 的晚安）→ 从第一个输入信封处整段砍掉。
+  // 但 10-29 16:29 那次是信封在最前面、后面才是正文（它只是把输入复读了一遍），
+  // 那种只丢信封行、不砍后半段。判据：信封左边已经有要发出去的真话 → 它在演下一轮；没有 → 只是复读。
+  const linesOfShaped = repairShape(text).split('\n')
+  const cutAt = linesOfShaped.findIndex((line) => SCRIPT_REPLAY_RE.test(line.trim()))
+  const beforeCut = cutAt >= 0 ? linesOfShaped.slice(0, cutAt) : []
+  const headsReal = beforeCut.some((line) => {
+    const t = line.trim()
+    return t && !hasSilentMark(t) && !/^\[?\s*SILENT\s*\]?$/i.test(t)
+  })
+  const kept = (cutAt >= 0 && headsReal ? beforeCut : linesOfShaped).map((line) => {
     let t = line.trim()
     if (!t) return ''
     // 模型自己的界面标记（`已思考（用时1秒）好模型`）→ 剥掉标记，话留下；只剩标记就丢
@@ -467,6 +601,10 @@ export function stripLeakedThinking(text) {
     }
     // 整行是插件自己的上下文信封（`[现在是 …]` / `[姐姐] …`）→ 不是话，丢掉
     if (CONTEXT_ECHO_RE.test(t)) return null
+    // 引号残行：`写东西是写什么，随手记还是正经写」想吃的这条本姑娘懂，最管用`
+    // ——左引号在前一行、右引号落在这行，是候选清单被拆散后拼出来的残片。
+    // 正常跨行引用一般以右引号收尾，所以只拦「右多左少 + 不以右引号结尾」。
+    if (looksBrokenQuote(t)) return null
     // 整行是「点评自己上一句」的元话（`破折号? fine.`）→ 丢掉
     if (looksSelfReview(t)) return null
     // 整行是英文改稿标签（`— better: 打爽了没` / `Reply: 平手，还行`）→ 丢掉
@@ -514,11 +652,57 @@ export function stripLeakedThinking(text) {
     return t
   })
   return collapseRepeats(
-    dedupeLines(dropShortPrefixes(collapseSameHeadRun(collapseDraftLines(kept))))
+    dedupeLines(
+      dropShortPrefixes(
+        collapseSameHeadRun(collapseDraftLines(dropQuotedCandidates(dropSelfHush(kept)))),
+      ),
+    )
       .join('\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim(),
   )
+}
+
+/**
+ * 整行只有一对引号包着一小句：`「写东西这条本姑娘好奇」`。
+ * 它单独出现时可能是正常引用（「他说「别急」」那种），所以不敢一律删；
+ * 只有**紧挨着已被判死的草稿行**时才算候选清单里的一条。
+ */
+const QUOTED_ONLY_RE = /^(?:「[^「」\n]{1,24}」|『[^『』\n]{1,24}』)[。.！!？?]?$/
+
+function dropQuotedCandidates(lines) {
+  const neighbor = (from, step) => {
+    for (let i = from; i >= 0 && i < lines.length; i += step) {
+      const v = lines[i]
+      if (v === '') continue
+      return v
+    }
+    return ''
+  }
+  return lines.map((line, i) => {
+    if (typeof line !== 'string' || !line) return line
+    if (!QUOTED_ONLY_RE.test(line)) return line
+    const prev = neighbor(i - 1, -1)
+    const next = neighbor(i + 1, 1)
+    if (prev === null || next === null) return null
+    return line
+  })
+}
+
+/**
+ * 引号不配对的残行（2026-11-03 14:38）：
+ * `写东西是写什么，随手记还是正经写」想吃的这条本姑娘懂，最管用`
+ * 左边半句来自被删掉的候选、右边接着另一条候选，右引号比左引号多。
+ * 跨行引用（`别急」` 收尾那种）不拦；太长的正常段落也不拦。
+ */
+function looksBrokenQuote(line) {
+  const t = String(line ?? '').trim()
+  if (!t || t.length > 80) return false
+  if (t.includes('你')) return false
+  const opens = (t.match(/「/g) ?? []).length + (t.match(/『/g) ?? []).length
+  const closes = (t.match(/」/g) ?? []).length + (t.match(/』/g) ?? []).length
+  if (closes <= opens) return false
+  return !/[」』]$/.test(t)
 }
 
 /** 太短不算一句，避免「嗯。」单独发一条。 */
@@ -613,6 +797,46 @@ export function reasoningTail(message) {
 }
 
 /**
+ * 2026-11-05 11:12：正文空、思考里有成品时，把它捞回来。
+ *
+ * 事故现场（老二 10:47，姐姐发「记仇，还挺正常」）：那一轮的 assistant/message
+ * 只有 reasoning，text 块是空的；想说的那句整句留在思考末尾——
+ * 「发。不过他不是记在纸上，是留在自己脸上——每天照镜子都能看见」
+ * 旧代码在 !textReplyEnabled 分支里只打一行「没有正文（只有思考）」就放弃，
+ * QQ 那边一个字都没响，外面看就是「它突然不理我了」。
+ *
+ * 只捞最后一段，只认两种形状，拿不准就返回空串——
+ * 宁可不发，也不能把盘算播出去：
+ *   ① 以「发。/回复：/说：」开头的，砍掉前缀剩下的就是成品；
+ *   ② 最后一段本身像话（有中文、够长、没有改稿元话）。
+ */
+const SALVAGE_PREFIX = /^\s*(?:发|回复|说|答|就这么说|那就说)\s*[。.：:,，]\s*/
+const SALVAGE_META = /再加|改一下|改一改|换个说法|这句|我可以说|会不会显得|太冷淡/
+// 2026-11-06：思考里「她说…/我回…」这种排练对白，不是成品对白，一个字都别捞。
+// 缘由：私聊恒必回的一次「嗯」就能让模型先编一句「她其实想说 X」再照着回，编出来的成品
+// 对白一旦被兜底捞出去，就是「替她说话」真发到 QQ。宁可不发，也不能替她说。
+const SALVAGE_REHEARSAL =
+  /^\s*(?:她说|她可能|她大概|她应该|她要是|她刚才|我回|我答|我该回|我就回|那就回|定[：:]|好[，,]?那(?:就|我)回)/
+export function salvageFromReasoning(message) {
+  const tail = reasoningTail(message)
+  if (!tail || tail.includes(SILENT_MARKER)) return ''
+  const paras = tail
+    .split(/\n\s*\n/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (paras.length === 0) return ''
+  const last = paras[paras.length - 1]
+  if (SALVAGE_REHEARSAL.test(last)) return ''
+  const stripped = SALVAGE_PREFIX.test(last) ? last.replace(SALVAGE_PREFIX, '').trim() : ''
+  const candidate = stripped || last
+  if (!candidate || !HAS_CJK.test(candidate)) return ''
+  if (SALVAGE_META.test(candidate)) return ''
+  if (SALVAGE_REHEARSAL.test(candidate)) return ''
+  if (cjkCount(candidate) < 4) return ''
+  return stripClosingTalk(candidate).trim()
+}
+
+/**
  * 兜底捞 reasoning 时，把「改稿指令」和「自问自答」的段落剥掉，只留真的像话的那部分。
  *
  * 2026-10-27 15:08 事故：她那轮 text 是空的，reasoning 写的是
@@ -704,15 +928,15 @@ export function stripClosingTalk(text) {
  * 后面那条纯文本（「结束这轮，不再说话。」）就照样被当成正文又发了一遍。
  * 只收「说话类」工具；qq_poke / qq_react / qq_like 是互动不是发言，
  * 放进来的话，她点个赞就把正经回话拦掉了。
+ *
+ * 2026-11-06 21:20 修（仓库 issue #12 / PR #13，delta7v3r 提的）：
+ * 原来这里还列着 `qq_send_image` / `qq_send_file` / `qq_face` / `qq_mface`，
+ * 可这四个一个字都不发——参数只有 file / id / summary（summary 是挑图用的名字）。
+ * 把它们放进来等于宣布「本轮已经开过口了」，于是发完表情包、图片之后，
+ * 同一轮后面那句正文被 `assistant/message` 直接丢掉（「发了表情包，配的话不见了」）。
+ * 白名单收窄成真正会发文字的两个。
  */
-const SELF_SENDING_TOOLS = new Set([
-  'qq_reply',
-  'qq_send',
-  'qq_send_image',
-  'qq_send_file',
-  'qq_face',
-  'qq_mface',
-])
+const SELF_SENDING_TOOLS = new Set(['qq_reply', 'qq_send'])
 
 /**
  * 这一轮是不是「主动机会」（`wake.js` 的 `fire()` 投的 `【主动机会】`）。
@@ -747,6 +971,23 @@ export function createOutbound({ manager, config, logger, send, wake }) {
 
   const streamMax = Number(config.streamMaxChunks ?? 3)
   const streamEnabled = config.streamReply !== false
+  // 2026-11-04 14:45 姐姐定：正文不再自动发到 QQ，要说的话必须调 qq_send / qq_reply。
+  // 这一条门是「砍掉正文直发」的总闸，关掉之后 outbound 里的过滤正则全部变成兜底。
+  const textReplyEnabled = config.textReply === true
+  /**
+   * 2026-11-04 14:52 姐姐说「会忘记调用工具。老三已经出现了」——14:48 那三条消息它一句都没回，
+   * 因为它把话写进了正文、没调工具。所以总闸不能是「一律不发」，得留一道**保守兜底**：
+   * 这一轮既没调发送工具、也没调任何工具、也没写 [SILENT]，说明它就是想说话只是忘了调用，
+   * 那一句话可以替它发——**但前提是那原文一个字都不用洗**。
+   *
+   * 判据：`stripLeakedThinking(raw) === raw.trim()`。只要清洗动过它（删行、换 `<br>`、砍信封、
+   * 去掉 markdown 号），说明正文里有脏东西，整条不发。这样自演下一轮、`嗯，这个明白`、
+   * 带信封的草稿全都拦在门外，只放「本来就是干净的一两句人话」过去。
+   * 想彻底关掉兜底就把 textReplyFallback 设成 false。
+   */
+  const textReplyFallback = config.textReplyFallback !== false
+  const pendingText = new Map() // sessionId -> 这一轮最后一条纯文本正文（等 turn/end 决定发不发）
+  const turnTouchedTool = new Set() // sessionId -> 本轮调过工具（那就不是「忘发」，不兜底）
 
   /**
    * 一切往外发的文字都从这儿走。
@@ -779,7 +1020,8 @@ export function createOutbound({ manager, config, logger, send, wake }) {
 
     // ── 流式：只在私聊开，群聊一口气发完更清爽 ──
     if (type === 'assistant/chunk') {
-      if (!streamEnabled || record.scope === 'group') return
+      // 流式也是正文直发的一种：总闸关着就一句都不冒。
+      if (!textReplyEnabled || !streamEnabled || record.scope === 'group') return
       if (selfSent.has(sessionId)) return // 本轮走的是工具发送，别再流式插嘴
       const chunk = data.chunk
       if (chunk?.type !== 'text-delta' || typeof chunk.text !== 'string') return
@@ -807,6 +1049,67 @@ export function createOutbound({ manager, config, logger, send, wake }) {
     }
 
     if (type === 'assistant/message') {
+      // 2026-11-04 14:45 姐姐定：正文直发整条关掉。
+      // 以前这条分支是「模型不调工具就把正文当消息发」——所有漏话（`<br>`、`嗯，这个明白`、
+      // 自演下一轮、伪造 system-reminder）都是从这条路出去的，过滤越加越厚。
+      // 现在要说的话必须显式调 qq_send / qq_reply；不调 = 这轮不想说，正好也是允许的。
+      // 想看旧行为把 textReply 设成 true。
+      //
+      // 但「忘了调工具」是真会发生的（14:48 老三连着三条没回），所以这里不直接扔掉：
+      // 把这一轮的纯文本记下来，turn/end 时再看要不要兜底发（判据在 turn/end 里）。
+      if (!textReplyEnabled) {
+        resetStream(sessionId)
+        if (selfSent.has(sessionId) || hasToolUse(data.message)) {
+          pendingText.delete(sessionId) // 说过了 / 在干活，不兜底
+          return
+        }
+        let raw = extractText(data.message)
+        if (!raw.trim()) {
+          // 22:20 之前 20:20:22 那轮就是这样：整段话全写进 reasoning，text 块是空的，
+          // 外面看着像「突然哑了」，日志里却一个字都没有。至少留一行。
+          //
+          // 2026-11-05 11:12 修：光留一行不够。老二 10:47 那轮把成品留在思考末尾
+          // （详见 salvageFromReasoning 的注释），捞回来接着走下面的兜底流程。
+          const salvaged = salvageFromReasoning(data.message)
+          if (salvaged) {
+            logger.info?.(
+              `[dsh-qq] ${record.label} 正文是空的，从思考末尾捞回一句（${salvaged.length} 字）`,
+            )
+            raw = salvaged
+          } else {
+            logger.info?.(`[dsh-qq] ${record.label} assistant/message 没有正文（只有思考）`)
+          }
+        }
+        // 2026-11-04 23:50 姐姐定（B）：[SILENT] 不能一刀切。
+        // 22:20 那次正文是「好了，能写能读… [现在是 2026-11-04 周三 22:20（晚上）] [姐姐] 嗯呢 [SILENT] [现在是 2026-」
+        // ——演过头，把下一轮的信封和标记一起写进了正文。旧的 `includes(SILENT)` 直接存空串，
+        // 结果整轮不发、日志也不留，从外面看就是「突然哑了」。
+        // 现在分三种：
+        //   ① 标记前面混着自演信封 → 砍掉信封和标记后面，留下的真话照常兜底；
+        //   ② 标记前面只是心里话（没有信封）→ 维持原判，整条按沉默（10-28 12:38 那条不变）；
+        //   ③ 标记前面什么都没有 → 她就是在选沉默。
+        const silentAt = findSilentMark(raw)
+        if (silentAt < 0) {
+          pendingText.set(sessionId, raw)
+          return
+        }
+        const head = raw.slice(0, silentAt)
+        const withoutReplay = cutAtScriptReplay(head).trim()
+        if (!withoutReplay || withoutReplay === head.trim()) {
+          pendingText.set(sessionId, '')
+          return
+        }
+        const kept = stripClosingTalk(stripLeakedThinking(withoutReplay)).trim()
+        if (!kept) {
+          pendingText.set(sessionId, '')
+          return
+        }
+        logger.info?.(
+          `[dsh-qq] ${record.label} 正文在 ${SILENT_MARKER} 前面还有真话，砍掉自演那截继续兜底（留 ${kept.length} 字）`,
+        )
+        pendingText.set(sessionId, kept)
+        return
+      }
       // 本轮已经用 qq_reply 之类的工具把话发过了 → 不再重复转发
       if (selfSent.has(sessionId)) {
         resetStream(sessionId)
@@ -827,8 +1130,14 @@ export function createOutbound({ manager, config, logger, send, wake }) {
       // 剩下那句心里话反倒被当成正文发了出去。标记的语义是「这句是跟我自己说的」，
       // 只要它在，整条都不发——不看前后还写了什么，也不兜底、不扣额度。
       const rawText = extractText(data.message)
-      if (rawText.includes(SILENT_MARKER)) {
-        logger.info?.(`[dsh-qq] ${record.label} 正文带 ${SILENT_MARKER}，整条按沉默处理（不兜底）`)
+      // 2026-11-05 20:20 事故：工具调用标记漏成正文（DSML），整条不发。见 looksLikeLeakedToolMarkup。
+      if (looksLikeLeakedToolMarkup(rawText)) {
+        logger.info?.(`[dsh-qq] ${record.label} 正文漏出 DSML 工具标记，整条不发`)
+        resetStream(sessionId)
+        return
+      }
+      if (hasSilentMark(rawText)) {
+        logger.info?.(`[dsh-qq] ${record.label} 正文带沉默标记，整条按沉默处理（不兜底）`)
         resetStream(sessionId)
         wake?.noteProactiveSilent?.(record)
         return
@@ -866,7 +1175,7 @@ export function createOutbound({ manager, config, logger, send, wake }) {
       }
       if (!text && !hasToolUse(data.message)) {
         const tailed = reasoningTail(data.message)
-        if (tailed.includes(SILENT_MARKER)) {
+        if (hasSilentMark(tailed)) {
           // 2026-10-27 16:00 事故：她那轮 reasoning 是「嗯，但会不会显得太冷淡？不，规矩说不发也可以。」
           // 加「我选 [SILENT]。」——text 空，兜底把整段捞成正文，连标记一起发到了 QQ 上。
           // 带静默标记就当她自己选了潜水：交给 send 按沉默处理（不扣主动额度）。
@@ -917,6 +1226,36 @@ export function createOutbound({ manager, config, logger, send, wake }) {
     }
 
     if (type === 'turn/end') {
+      // ── 忘了调工具的兜底（2026-11-04 14:52 姐姐：「会忘记调用工具。老三已经出现了」）──
+      // 只在三种条件同时成立时发：没调过任何工具（不是干活轮）、没自己发过（selfSent）、
+      // 正文原文一个字都不用洗。清洗动过就说明里面有信封/草稿/自演，宁可不说。
+      const pending = pendingText.get(sessionId)
+      pendingText.delete(sessionId)
+      // 2026-11-04 15:00：`touched` 不再当门槛。它记的是「调过任何工具」，
+      // 可老三最常见的模式恰恰是「qq_memo 读一段 → 说一句」——读文件被算成干活轮，
+      // 于是「读完了…」整句被扣下，QQ 那边一条都不响（14:52 重启后 0 条 → 的现场）。
+      // 真正该排掉的是「正文里全是盘算」，那由下面的 pristine 判定负责。
+      turnTouchedTool.delete(sessionId)
+      const sentByTool = selfSent.has(sessionId)
+      if (!textReplyEnabled && textReplyFallback && pending && !sentByTool) {
+        const clean = stripClosingTalk(stripLeakedThinking(pending))
+        // 2026-11-04 15:03：不再要求「洗了等于没洗」。老三几乎每轮都在正文里先写
+        // 「她夸我可爱…回一句软的」这种盘算，再写真话；要求原文一字不动，
+        // 等于每轮都扣下（15:02:10 那轮就是「正文要清洗，按不发处理」）。
+        // 现在按「洗过的结果」发——真正的雷（自演下一轮、伪造信封）单独判：带信封的整轮不发。
+        const hasScript = pending.split('\n').some((line) => SCRIPT_REPLAY_RE.test(line.trim()))
+        if (clean && !hasScript && !(data.reason?.kind === 'error')) {
+          logger.info?.(
+            `[dsh-qq] ${record.label} 这一轮没调发送工具，兜底发出去（清洗后 ${clean.length}/${pending.trim().length} 字）`,
+          )
+          await emit(record, clean)
+        } else if (pending.trim()) {
+          logger.info?.(
+            `[dsh-qq] ${record.label} 这一轮没调发送工具，正文${hasScript ? '自演了下一轮' : '洗不出话'}，按不发处理`,
+          )
+        }
+      }
+
       lastSent.delete(sessionId)
       selfSent.delete(sessionId)
       resetStream(sessionId)
@@ -934,6 +1273,7 @@ export function createOutbound({ manager, config, logger, send, wake }) {
 
     if (type === 'tool/call') {
       const name = String(data.name ?? '')
+      turnTouchedTool.add(sessionId) // 这一轮动过手，就不是「忘了调工具」，不兜底
       if (SELF_SENDING_TOOLS.has(name)) selfSent.add(sessionId)
       // 她 read 了门口的信 → 记一笔「这封拆过了」。
       // 2026-10-27 姐姐发现：她读过之后，下次提示还是「挂着 3 封没拆」——

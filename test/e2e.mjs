@@ -115,10 +115,14 @@ const privateAgent = created[0]
 assert.match(textOf(privateAgent.received[0]), /在吗在吗/, '私聊正文应该原样进 agent')
 assert.match(textOf(privateAgent.received[0]), /你叫小满/, 'persona 应该拼进首条投递')
 assert.match(textOf(privateAgent.received[0]), /你正在用 QQ 跟人聊天/, '首条应该带内置聊天规矩')
+// 2026-11-06：正文就是话本身，不再每条前面铺一行 `[现在是 …]` 的信封
+// （那个形状会被模型当成可续写的模板，自己照着写，于是演下一轮）。
+assert.doesNotMatch(textOf(privateAgent.received[0]), /\[现在是/, '不该再出现行首的时间信封')
+assert.doesNotMatch(textOf(privateAgent.received[0]), /\[姐姐\] 在吗在吗/, '私聊不该再给正文加 [姐姐] 前缀')
 assert.match(
   textOf(privateAgent.received[0]),
-  /\[现在是 \d{4}-\d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（(凌晨|早上|上午|中午|下午|傍晚|晚上|深夜)）\]/,
-  '私聊正文应该带一行「现在是 …」的人话时间',
+  /（这会儿是 \d{2}:\d{2}）/,
+  '会话第一条应该用一句圆括号交代现在几点',
 )
 console.log('✓ 私聊入站 → agent.followup')
 

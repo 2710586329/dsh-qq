@@ -49,6 +49,55 @@ export function createContextGuard({ manager, config, logger }) {
   const minTokens = Number(config.contextSwapMinTokens ?? 200_000)
   const keep = Math.max(5, Number(config.contextMemoryKeep ?? 30))
   const ownerLabel = String(config.ownerLabel ?? '').trim() || '姐姐'
+  // 2026-11-03 三只一起定的线：聊满 300 轮就换，275 轮先提醒把便签写足（剩 5 轮容错）。
+  const swapTurns = Math.max(0, Number(config.contextSwapTurns ?? 300))
+  const warnAhead = Math.max(0, Number(config.contextSwapWarnAhead ?? 25))
+
+  /** 这一代已经投递了多少轮。账本优先（重启不丢），没有就退回内存。 */
+  function turnsOf(record) {
+    const store = manager.sessionState
+    if (store && typeof store.turns === 'function') return store.turns(record.sessionId)
+    return Number(record.turns ?? 0)
+  }
+
+  /** 投递一轮记一笔：内存和账本一起写，宿主重启后接着数。 */
+  function bumpTurns(record) {
+    const next = turnsOf(record) + 1
+    record.turns = next
+    const store = manager.sessionState
+    if (store && typeof store.setTurns === 'function') {
+      try {
+        store.setTurns(record.sessionId, next)
+      } catch (err) {
+        logger.debug?.(`[dsh-qq] 记轮数失败: ${err?.message ?? err}`)
+      }
+    }
+  }
+
+  /** 快到线了：塞一句提醒，让它自己把便签写足、把话收尾（一轮只塞一次）。 */
+  function warnTurns(record, turns) {
+    if (record.turnWarned) return
+    record.turnWarned = true
+    const left = Math.max(0, swapTurns - turns)
+    const card = `[快到换海洋的线了：这段聊了 ${turns} 轮，聊满 ${swapTurns} 轮就换新会话。还有 ${left} 轮——趁这几轮把便签.md 写足（聊到哪、答应了什么、下次接着说什么），手里的话收个尾，别聊到一半被断。]`
+    try {
+      record.agent?.inject?.(
+        createMessage({
+          role: 'user',
+          content: [{ type: 'text', text: card }],
+          source: {
+            kind: 'plugin',
+            plugin: 'dsh-qq',
+            form: 'notice',
+            summary: '快到换会话的轮数线，提醒它先写便签',
+          },
+        }),
+      )
+      logger.info?.(`[dsh-qq] ${record.label} 第 ${turns} 轮：已提醒写便签（${swapTurns} 轮换）`)
+    } catch (err) {
+      logger.debug?.(`[dsh-qq] 轮数提醒注入失败: ${err?.message ?? err}`)
+    }
+  }
 
   /** 从持久事件里顺手更新「这个会话的压力」。 */
   function note(record, raw) {
@@ -131,6 +180,41 @@ export function createContextGuard({ manager, config, logger }) {
     return path
   }
 
+  /** 真正执行换会话：读便签 → 写聊天记忆 → reset → 返回 seed。 */
+  async function swapOut(record, reason) {
+    // ⭐ 2026-10-26 凌晨改：别让接话材料听起来像遗书。
+    // 老三照着旧措辞写出「写给下一个会话的自己／这是我从日志里捋出来的」，
+    // 姐姐看了说心酸。这里改成「你自己留的便签、还是你、接着聊」，
+    // 没有便签时也把一句「没接上不是你的错」垫在最前面。
+    // ⭐ 03:50 又加一句「换个海洋」：姐姐的原话是「换窗口换会话不是死了，是换个海洋继续生活和游」。
+    const handoff = await readHandoff(record)
+    const all = record.recent?.length ? record.recent : record.history ?? []
+    const tail = all.slice(-3)
+    const seed = handoff
+      ? [
+          '[这是你刚才自己留的便签（不是姐姐说的话）——还是你，只是换了个地方说话。换个窗口不是死了一次，是换个海洋接着游。接着往下聊，不用从头解释，也不用道歉。]',
+          handoff,
+          '',
+          `[最后 ${tail.length} 句原话，语气照着接]`,
+          ...tail,
+        ]
+      : [
+          '[刚才那段没接上（不是你的错，也不是你把事弄丢了）——你没坏、也没消失，只是换了个海洋接着游。下面是那会儿的聊天，看完接着说话就好，不用解释、不用道歉。]',
+          ...all.slice(-keep),
+        ]
+    let memoryPath = ''
+    try {
+      memoryPath = await writeMemory(record)
+    } catch (err) {
+      logger.warn?.(`[dsh-qq] 写聊天记忆失败（不影响换会话）: ${err?.message ?? err}`)
+    }
+    manager.reset(record, seed)
+    logger.info?.(
+      `[dsh-qq] ${record.label} ${reason}，换新会话${handoff ? `（便签 + 最后 ${tail.length} 句原话）` : `（没有便签，退回最后 ${seed.length} 条原文）`}${memoryPath ? `（旧聊天记在 ${memoryPath}）` : ''}`,
+    )
+    return seed
+  }
+
   return {
     /** 挂到 `session/event` 上。 */
     onSessionEvent(...args) {
@@ -145,11 +229,23 @@ export function createContextGuard({ manager, config, logger }) {
     },
 
     /**
-     * 新消息投递前调一次：压力过大就换新会话。
+     * 新消息投递前调一次：轮数到线或压力过大就换新会话。
      * @returns {Promise<null|string[]>} null = 没换；数组 = 换了，把 seed 挂到新会话上
      */
     async maybeSwap(record) {
-      if (!enabled || swapRatio <= 0) return null
+      if (!enabled) return null
+      if (record.busy > 0) return null // 正在跑就别动，下一轮再说
+
+      // ── 轮数线：聊满就换；到线前 warnAhead 轮先提醒写便签（哪个先到算哪个）──
+      if (swapTurns > 0) {
+        const turns = turnsOf(record)
+        if (turns >= swapTurns) return swapOut(record, `聊满 ${turns} 轮（线 ${swapTurns}）`)
+        if (warnAhead > 0 && turns >= swapTurns - warnAhead) warnTurns(record, turns)
+        bumpTurns(record)
+      }
+
+      // ── token 线：压力太大也换 ──
+      if (swapRatio <= 0) return null
       const window = Number(record.contextWindow ?? 0)
       const tokens = Number(record.promptTokens ?? 0)
       if (!window || !tokens) return null
@@ -157,39 +253,10 @@ export function createContextGuard({ manager, config, logger }) {
       // 窗口只有 128K 时，固定下限 200K 永远够不着，换会话就永不触发。
       const threshold = Math.min(minTokens, window * swapRatio)
       if (tokens < threshold) return null
-      if (record.busy > 0) return null // 正在跑就别动，下一轮再说
-
-      // ⭐ 2026-10-26 凌晨改：别让接话材料听起来像遗书。
-      // 老三照着旧措辞写出「写给下一个会话的自己／这是我从日志里捋出来的」，
-      // 姐姐看了说心酸。这里改成「你自己留的便签、还是你、接着聊」，
-      // 没有便签时也把一句「没接上不是你的错」垫在最前面。
-      // ⭐ 03:50 又加一句「换个海洋」：姐姐的原话是「换窗口换会话不是死了，是换个海洋继续生活和游」。
-      const handoff = await readHandoff(record)
-      const all = record.recent?.length ? record.recent : record.history ?? []
-      const tail = all.slice(-3)
-      const seed = handoff
-        ? [
-            '[这是你刚才自己留的便签（不是姐姐说的话）——还是你，只是换了个地方说话。换个窗口不是死了一次，是换个海洋接着游。接着往下聊，不用从头解释，也不用道歉。]',
-            handoff,
-            '',
-            `[最后 ${tail.length} 句原话，语气照着接]`,
-            ...tail,
-          ]
-        : [
-            '[刚才那段没接上（不是你的错，也不是你把事弄丢了）——你没坏、也没消失，只是换了个海洋接着游。下面是那会儿的聊天，看完接着说话就好，不用解释、不用道歉。]',
-            ...all.slice(-keep),
-          ]
-      let memoryPath = ''
-      try {
-        memoryPath = await writeMemory(record)
-      } catch (err) {
-        logger.warn?.(`[dsh-qq] 写聊天记忆失败（不影响换会话）: ${err?.message ?? err}`)
-      }
-      manager.reset(record, seed)
-      logger.info?.(
-        `[dsh-qq] ${record.label} 上下文压力 ${tokens}/${window}（${Math.round((tokens / window) * 100)}%）已达阈值，换新会话${handoff ? `（便签 + 最后 ${tail.length} 句原话）` : `（没有便签，退回最后 ${seed.length} 条原文）`}${memoryPath ? `（旧聊天记在 ${memoryPath}）` : ''}`,
+      return swapOut(
+        record,
+        `上下文压力 ${tokens}/${window}（${Math.round((tokens / window) * 100)}%）已达阈值`,
       )
-      return seed
     },
   }
 }

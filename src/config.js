@@ -40,6 +40,12 @@ export const ConfigSchema = Schema.object({
   selfId: Schema.string()
     .default('')
     .description('机器人自己的 QQ 号。留空时启动会向 NapCat 查询 get_login_info'),
+  sessionLabel: Schema.string()
+    .default('')
+    .description(
+      '私聊会话标题里带的称呼，例如「老二·水仙女」。桌面端的会话标题取自注入消息的首行，' +
+        '填了以后三只鲸鲸的私聊会话在列表里就能一眼认出来；留空退回人设文件名',
+    ),
   reconnectMs: Schema.number()
     .default(5000)
     .description('断线重连间隔，单位毫秒'),
@@ -301,6 +307,16 @@ export const ConfigSchema = Schema.object({
   streamReply: Schema.boolean()
     .default(true)
     .description('私聊是否边生成边发（群聊始终整段发）'),
+  textReply: Schema.boolean()
+    .default(false)
+    .description(
+      '不调发送工具时，模型正文要不要直接当消息发出去。默认 false（2026-11-04 姐姐定）：要说的话一律走 qq_send / qq_reply，正文只留在思考和日志里',
+    ),
+  textReplyFallback: Schema.boolean()
+    .default(true)
+    .description(
+      '「忘了调工具」的保守兜底：这一轮没调任何工具、没自己发过、正文一个字都不用清洗时，替它发一次；清洗能动到的（信封、草稿、自演）一律不发',
+    ),
   streamMaxChunks: Schema.number()
     .default(3)
     .description('一个回合里最多流式发几条，超出就攒起来一起发'),
@@ -316,7 +332,7 @@ export const ConfigSchema = Schema.object({
     ),
   proactiveMaxPerDay: Schema.number()
     .default(6)
-    .description('每个会话每天最多主动开口几次；0 = 不主动'),
+    .description('每个会话每天最多主动开口几次；0 = 不主动；负数 = 不限次数'),
   proactiveQuietHours: Schema.string()
     .default('23:00-08:00')
     .description('静默时段：这段时间不主动开口。格式 HH:MM-HH:MM，留空 = 不限'),
@@ -401,6 +417,16 @@ export const ConfigSchema = Schema.object({
   contextMemoryKeep: Schema.number()
     .default(30)
     .description('换会话前把最近多少条聊天记进 记忆区/压缩记忆/，给新会话接话用'),
+  contextSwapTurns: Schema.number()
+    .default(300)
+    .description(
+      '聊满多少轮就主动换新会话（0 = 只按 token 换）。2026-11-03 三只一起定的：300 轮，换之前先提醒写便签',
+    ),
+  contextSwapWarnAhead: Schema.number()
+    .default(25)
+    .description(
+      '提前多少轮提醒「把便签写足、话收个尾」，默认 25（300 轮换 → 275 轮提醒，剩 5 轮容错）',
+    ),
 
   // ── 聊天流水 ──
   chatLog: Schema.boolean()
