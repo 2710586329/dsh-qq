@@ -24,6 +24,9 @@ import { appendFact, upsertGlossaryTerm } from './settings.js'
 import { auditOutbound } from './audit.js'
 import { lookupMeme } from './meme.js'
 import { downloadImage } from './inbound.js'
+import { stripLeakedThinking } from './outbound.js'
+import { hasSilentMark, stripSilentMark } from './prompts.js'
+import { cutSelfInjection } from './sanitize.js'
 
 /**
  * 工具直接发出去的文字也要过审计。
@@ -38,6 +41,48 @@ function assertOutboundText(config, logger, text) {
   throw new Error(
     `这条没有发出去：内容里带了本机路径或凭据特征（${verdict.kind}）。换个说法再试。`,
   )
+}
+
+/**
+ * 工具发出去的文字也要过同一道清洗（2026-11-07 12:41 姐姐截图后补）。
+ *
+ * 现场：QQ 里老大发出去一串 `</||DSML||parameter></||DSML||invoke></||DSML||calls>`，
+ * 另外单独一条 `[SILENT]`。两样都从 `qq_send` 原样出去了——
+ * `send()` 那条兜底路有 `stripLeakedThinking` 和沉默判断，工具这条路一行都没有。
+ *
+ * 这里补上：剥工具/调用标签 → 剩下的若是空、或只有一个沉默标记，就当这条没发。
+ * 返回 null 表示「不发」，返回字符串表示「发这个」。
+ *
+ * 2026-11-15 19:16 再补一刀（姐姐截图那次）：老三在正文里自己写了一段
+ * 「【插件注入·每隔一阵钉一次·不是她说的】」+ 四行短规矩 + 假对白，
+ * 从 qq_reply 原样出去了，跟她真的收到的注入一字不差。
+ * 谁在正文里写这种标记，只能是模型自己编的——砍掉，并回一句回执让它知道被拦了。
+ */
+function cleanToolText(raw, logger, tag, extra = {}) {
+  const source = String(raw ?? '')
+  const stripped = stripLeakedThinking(source).trim()
+  const spoken = stripSilentMark(stripped).trim()
+  const guard = cutSelfInjection(spoken, { tag: extra?.record?.injectTag })
+  if (guard.cut) {
+    logger?.warn?.(`[dsh-qq] ${tag} 正文里自写了插件注入标记（${guard.kind}），已砍掉：${guard.head}`)
+    try {
+      extra?.bridge?.noteSelfInjection?.(extra?.record, guard.head, guard.kind)
+    } catch (err) {
+      logger?.debug?.(`自注入回执记录失败：${err?.message ?? err}`)
+    }
+  }
+  const finalText = guard.cut ? guard.text : spoken
+  if (!finalText) {
+    logger?.info?.(
+      `[dsh-qq] ${tag} 清洗后为空（原文 ${source.length} 字${hasSilentMark(source) ? '，含沉默标记' : ''}${guard.cut ? '，整段是伪造的注入标记' : ''}），这条不发`,
+    )
+    return null
+  }
+  if (spoken !== stripped) logger?.info?.(`[dsh-qq] ${tag} 正文里的 [SILENT] 标记已剥掉，发剩下的`)
+  if (stripped.length < source.trim().length) {
+    logger?.info?.(`[dsh-qq] ${tag} 正文剥掉了 ${source.trim().length - stripped.length} 字的标签残留`)
+  }
+  return finalText
 }
 
 const POKE_DESC =
@@ -107,7 +152,7 @@ function peerOf(record) {
     : { user_id: Number(record.peerId) }
 }
 
-export function registerTools(ctx, { client, manager, config, logger, pin, wake, noteSelfSaid }) {
+export function registerTools(ctx, { client, manager, config, logger, pin, wake, noteSelfSaid, send, bridge }) {
   const tools = ctx.get?.('tools')
   if (!tools?.register) {
     logger.info?.('tools 服务不可用，QQ 互动工具未注册（聊天本身不受影响）')
@@ -253,10 +298,11 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     tools.register({
       name: 'qq_memo',
       description:
-        '读写全家共用的那座记忆区（本地记忆区/）。注意：你自己的 write 只能落在本会话目录里，' +
-        '想往全家的日记、今天.md、项目文档、大纲里写，只能用这支笔。' +
+        `读写你自己那座记忆区（${memoRootAbs}）。注意：你自己的 write 只能落在本会话目录里，` +
+        '想往自己的日记、待续.md、项目文档、大纲里写，只能用这支笔。' +
+        '只写你自己这本——大姐、三妹、别的会话的记忆区都不要碰。' +
         'read=看一篇；append=往文件末尾加一段（最常用，也最安全）；write=整篇覆盖（动手前先 read，别把别人写的压掉）；' +
-        'list=看某个目录下有什么。path 是相对记忆区的路径，比如 `今天.md`、`日记/2026-10-30.md`、`项目/xxx.md`。只认 .md / .txt。',
+        'list=看某个目录下有什么。path 是相对记忆区的路径，比如 `待续.md`、`日记/2026-11-08.md`、`项目/xxx.md`。只认 .md / .txt。',
       parameters: {
         type: 'object',
         properties: {
@@ -411,10 +457,17 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
         required: ['ok'],
         additionalProperties: false,
       },
-      render: (_args, value) =>
-        value.ok
-          ? [{ type: 'text', text: `便签：还有 ${Number(value.openCount ?? 0)} 条没接上` }]
-          : [{ type: 'text', text: '便签没写成（看一眼日志）' }],
+      render: (args, value) => {
+        if (!value.ok) return [{ type: 'text', text: '便签没写成（看一眼日志）' }]
+        // 2026-11-07 20:26 修：原来不管 action 是什么都只回「还有 N 条没接上」，
+        // list 的内容一个字都到不了模型手里，翻便签等于没翻。
+        if (String(args?.action ?? '') === 'list') {
+          const body = (Array.isArray(value.lines) ? value.lines : []).filter((l) => String(l).trim() !== '')
+          if (body.length === 0) return [{ type: 'text', text: '便签是空的' }]
+          return [{ type: 'text', text: ['便签全文：', ...body.map((l) => `· ${String(l).trim()}`)].join('\n') }]
+        }
+        return [{ type: 'text', text: `便签：还有 ${Number(value.openCount ?? 0)} 条没接上` }]
+      },
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
@@ -868,10 +921,15 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     async execute(args, exec) {
       const record = needRecord(manager, exec)
       assertQuiet(record)
-      const text = String(args?.text ?? '')
-      if (!text) throw new Error('qq_reply: text 不能为空')
-      assertOutboundText(config, logger, text)
+      const raw = String(args?.text ?? '')
+      if (!raw) throw new Error('qq_reply: text 不能为空')
+      const text = cleanToolText(raw, logger, 'qq_reply', { record, bridge })
       const quoted = Number(args?.message_id ?? record.lastMessageId ?? 0) || 0
+      if (text === null) {
+        logger?.info?.(`[dsh-qq] ${record.label} qq_reply 清洗后没有可发的内容，这条不发`)
+        return { ok: true, messageId: 0, quoted }
+      }
+      assertOutboundText(config, logger, text)
       const segments = []
       if (quoted > 0) segments.push({ type: 'reply', data: { id: String(quoted) } })
       segments.push({ type: 'text', data: { text } })
@@ -918,30 +976,57 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
           ok: { type: 'boolean' },
           messageId: { type: 'integer' },
           target: { type: 'string' },
+          skipped: { type: 'boolean' },
         },
         required: ['ok'],
         additionalProperties: false,
       },
       render: (_args, value) => [
-        { type: 'text', text: value.ok ? `已发到 ${value.target}` : '发送失败' },
+        {
+          type: 'text',
+          text: value.skipped
+            ? '内容清洗后是空的，这条没发出去'
+            : value.ok
+              ? `已发到 ${value.target}`
+              : '发送失败',
+        },
       ],
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
       assertQuiet(record)
-      const text = String(args?.text ?? '')
-      if (!text) throw new Error('qq_send: text 不能为空')
+      const raw = String(args?.text ?? '')
+      if (!raw) throw new Error('qq_send: text 不能为空')
+
+      const to = String(args?.to ?? '').trim()
+      if (!to) {
+        // 2026-11-07 12:55：没指定收件人时走 index.js 的 send()。
+        // 清洗、[SILENT]、每轮 3 条硬闸、5 秒同行去重、审计、分条、`→` 日志、
+        // 写回历史——全在那一个函数里；工具这条路以前只过审计，
+        // 才会把 `[SILENT]` 和 `||DSML||` 标签原样发出去（姐姐两次截图都是它）。
+        // 出口只有一条，才不会再「哪里漏了补哪里」。
+        const result = await send(record, raw)
+        if (!result?.chunks) {
+          return { ok: true, messageId: 0, target: record.peerId, skipped: true }
+        }
+        return { ok: true, messageId: result.messageId ?? 0, target: record.peerId }
+      }
+
+      const text = cleanToolText(raw, logger, 'qq_send', { record, bridge })
+      if (text === null) {
+        logger?.info?.(`[dsh-qq] ${record.label} qq_send 清洗后没有可发的内容，这条不发`)
+        return { ok: true, messageId: 0, target: record.peerId, skipped: true }
+      }
       assertOutboundText(config, logger, text)
 
-      // 解析目标：默认当前会话
+      // 指定了收件人就走这条路（发给别人，不属于当前会话的分条/记账）
       let action = record.scope === 'group' ? 'send_group_msg' : 'send_private_msg'
       let target = record.scope === 'group'
         ? { group_id: Number(record.peerId) }
         : { user_id: Number(record.peerId) }
       let targetLabel = record.peerId
 
-      const to = String(args?.to ?? '').trim()
-      if (to) {
+      {
         const m = /^(user|group):(\d+)$/i.exec(to)
         if (!m) throw new Error('qq_send: to 格式要写成 user:123456 或 group:987654')
         const kind = m[1].toLowerCase()

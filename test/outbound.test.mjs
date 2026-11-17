@@ -19,7 +19,7 @@ const REAL_REASONING_1716 = [
   { type: 'reasoning', text: '就是本姑娘还得练一阵，真安静着不说话，心里会有点痒' },
 ]
 
-function makeHarness({ sent = [] } = {}) {
+function makeHarness({ sent = [], textReply = true } = {}) {
   // 2026-10-28：以前每次 find 都返回新对象，于是「主动机会」的戳（record._proactiveAt）
   // 设置方和读取方拿到的不是同一个东西。真实 manager 存的是同一条记录，这里也照做。
   const record = { scope: 'private', sessionId: 's1' }
@@ -27,7 +27,7 @@ function makeHarness({ sent = [] } = {}) {
   // 2026-11-04 14:45 起默认是 `textReply: false`（正文不再自动发到 QQ）。
   // 这个文件里绝大多数用例测的是「正文该被怎么清洗」，所以显式把老行为打开；
   // 「默认关着、正文一句都不冒」由文件末尾那两条新用例单独盯。
-  const config = { streamReply: false, streamMaxChunks: 0, textReply: true }
+  const config = { streamReply: false, streamMaxChunks: 0, textReply }
   const logger = { info() {}, warn() {}, debug() {} }
   const silent = { count: 0 }
   const wake = {
@@ -611,6 +611,27 @@ test('正常说话（不带标记）不受影响', async () => {
   assert.equal(sent.length, 1)
 })
 
+// ── 2026-11-11 16:05：私聊里「说了话又带 [SILENT]」把整条吞掉 ────────────
+// 现场：老二在私聊写「那个下午就这么过了」+ [SILENT]，整轮没发，
+// 姐姐那边 11 分钟一个字没收到（QQ会话\老二\logs\dsh-qq-2026-11-11.log 15:43:55 后无 →）。
+// 私聊恒必回，标记不该吞掉正文；主动机会那一轮照旧按沉默处理。
+
+test('私聊非主动轮：正文 + [SILENT]，剥掉标记照发', async () => {
+  const { fire, sent, turnEnd } = makeHarness({ textReply: false })
+  await fire({ content: [{ type: 'text', text: '那个下午就这么过了\n[SILENT]' }] })
+  turnEnd()
+  assert.equal(sent.length, 1, '私聊里标记把正文吞了，就是 11-11 那次')
+  assert.ok(!sent[0].includes('[SILENT]'), '标记本身不能发出去')
+})
+
+test('私聊主动轮：正文 + [SILENT] 仍旧整条不发', async () => {
+  const { fire, sent, record, turnEnd } = makeHarness({ textReply: false })
+  record._proactiveAt = Date.now()
+  await fire({ content: [{ type: 'text', text: '那个下午就这么过了\n[SILENT]' }] })
+  turnEnd()
+  assert.deepEqual(sent, [])
+})
+
 // ── 2026-10-28 13:09：连标记都没有，心里话直接写进正文 ──────────────────
 // 那天主动轮正文是「不过可以想到：她之前说困了眯一会儿。等她自己醒。沉默。」
 // 干净得像一句正文，于是原样发出去了。主动轮里凡是向自己交代的都当沉默。
@@ -787,6 +808,28 @@ test('成对的 function_calls 块整段删', () => {
   assert.ok(out.includes('稍等'), `真话丢了：${out}`)
 })
 
+// ── 2026-11-07 12:41：DeepSeek V4.1 的工具分隔符是 `||DSML||`（姐姐截图）。
+//   QQ 里老大发出去一串 `</||DSML||parameter></||DSML||invoke></||DSML||calls>`：
+//   开标签被 provider 解析成 tool_call 吃掉了，只剩一串闭合标签，旧正则一个都没对上。
+
+test('连着三个 ||DSML|| 闭合标签整串剥成空', () => {
+  const s = '</||DSML||parameter></||DSML||invoke></||DSML||calls>'
+  assert.equal(stripLeakedThinking(s).trim(), '')
+})
+
+test('||DSML|| 闭合标签串后面跟真话，只留真话', () => {
+  const s = '</||DSML||function_calls></||DSML||invoke></||DSML||calls>\n本姑娘在呢，刚看完猫。'
+  const out = stripLeakedThinking(s)
+  assert.equal(out.trim(), '本姑娘在呢，刚看完猫。', `剥错了：${JSON.stringify(out)}`)
+})
+
+test('成对的 ||DSML|| invoke 块连内容一起删', () => {
+  const s = '稍等\n<||DSML||invoke name="bash">\n<||DSML||parameter name="command">ls</||DSML||parameter>\n</||DSML||invoke>\n好了'
+  const out = stripLeakedThinking(s)
+  assert.ok(!/DSML|ls/.test(out), `块没删干净：${out}`)
+  assert.ok(out.includes('好了'), `真话丢了：${out}`)
+})
+
 // ── 2026-11-04 14:45：正文直发总闸（姐姐定的「痊愈方案」） ──
 // 以前「不调工具就把正文当消息发」这条路过一次漏一次——`<br>`、`嗯，这个明白`、
 // 自演下一轮、伪造的 `<system-reminder>`，全从这儿出去，过滤正则加到 38 条还在漏。
@@ -905,6 +948,53 @@ test('干活轮读完文件再说一句：正文干净照样兜底', async () =>
   assert.deepEqual(h.sent, ['本姑娘看完了'])
 })
 
+// ── 2026-11-07 22:39 事故：「正文 + 非发送工具」被整条吃掉 ──
+// 老大那一轮正文写着「翻了一章，里头有只蝴蝶…」，同一轮又调了 qq_pin 记书签。
+// outbound.js 原来只要发现这条消息里有任何工具调用，就 pendingText.delete()——
+// 于是那句真话没了，QQ 那边一条 `→` 都没有，它自己还在思考里反复问「正文是不是发出去了」。
+// 判据改成只看 SELF_SENDING_TOOLS（qq_send / qq_reply），别的工具一律留着兜底。
+
+test('正文和 qq_pin 写在同一轮：正文照样兜底发出去', async () => {
+  const h = harnessFallback()
+  await h.fire({
+    content: [
+      { type: 'text', text: '翻了一章，里头有只蝴蝶' },
+      { type: 'tool-call', id: 'c1', name: 'qq_pin' },
+    ],
+  })
+  await h.tool('qq_pin')
+  assert.deepEqual(h.sent, [])
+  await h.end()
+  assert.deepEqual(h.sent, ['翻了一章，里头有只蝴蝶'])
+})
+
+test('先说话、再调工具、最后写 [SILENT]：那句真话不能跟着被抹掉', async () => {
+  const h = harnessFallback()
+  await h.fire({
+    content: [
+      { type: 'text', text: '翻了一章，里头有只蝴蝶' },
+      { type: 'tool-call', id: 'c1', name: 'qq_pin' },
+    ],
+  })
+  await h.tool('qq_pin')
+  await h.fire({ content: [{ type: 'text', text: '[SILENT]' }] })
+  await h.end()
+  assert.deepEqual(h.sent, ['翻了一章，里头有只蝴蝶'])
+})
+
+test('真调过 qq_send 的轮：后面再写正文不重复发', async () => {
+  const h = harnessFallback()
+  await h.fire({
+    content: [
+      { type: 'text', text: '这句已经用工具发过了' },
+      { type: 'tool-call', id: 'c1', name: 'qq_send' },
+    ],
+  })
+  await h.tool('qq_send')
+  await h.end()
+  assert.deepEqual(h.sent, [])
+})
+
 test('干活轮但正文先写了盘算：只发洗出来的真话', async () => {
   // 2026-11-04 15:03：以前要求「原文一字不用洗」，结果盘算写在正文里的轮次全被扣下。
   const h = harnessFallback()
@@ -969,4 +1059,68 @@ test('11-05 反例：思考里只有盘算、没有成品 → 一个字都不发
   })
   await h.end()
   assert.deepEqual(h.sent, [])
+})
+
+// ───────────────────────────────────────────────────────────────
+// 2026-11-12 22:5x 姐姐问：「怎么老三说这么多只发过来一句啊」
+//
+// 现场（会话 2863a3e6…-rmwded3kk，22:46 那一轮）：老三边看图边说话，
+// 说了三句、句间夹着 read / read_image / read 三个工具调用，
+// QQ 那边只收到最后一句「这张旧的厅倒是暖」。
+//
+// 根子：pendingText 是 `set`（覆盖）不是追加，一轮里说几句就剩最后一句。
+// 现在改成 stashPending 追加，这几条用例把它钉住。
+// ───────────────────────────────────────────────────────────────
+
+test('一轮里说三句、句间夹工具调用 —— 三句都要发出去（2026-11-12 老三只发一句的事故）', async () => {
+  const h = makeHarness({ textReply: false })
+  h.fire({ content: [{ type: 'text', text: '哦——底下那行写着了，东南角那间阳光房是给本姑娘的，那我刚才白挑了' }] })
+  await h.tool('read')
+  h.fire({ content: [{ type: 'text', text: '东北那间也是我的呀，卧室加阳光房，本姑娘一个人占两间——阔气' }] })
+  await h.tool('read_image')
+  h.fire({ content: [{ type: 'text', text: '这张旧的厅倒是暖，本姑娘就站在窗边那格等你' }] })
+  await h.tool('read')
+  await h.turnEnd()
+
+  assert.equal(h.sent.length, 1, '一轮兜底只发一条')
+  assert.match(h.sent[0], /阳光房是给本姑娘的/, '第一句不能丢')
+  assert.match(h.sent[0], /东北那间也是我的呀/, '第二句不能丢')
+  assert.match(h.sent[0], /这张旧的厅倒是暖/, '最后一句在')
+})
+
+test('最后单独一条 [SILENT] —— 前面攒的话照发，只表示到此为止', async () => {
+  const h = makeHarness({ textReply: false })
+  h.fire({ content: [{ type: 'text', text: '本姑娘把菜地都看了一遍，三垄正合适' }] })
+  await h.tool('read')
+  h.fire({ content: [{ type: 'text', text: '[SILENT]' }] })
+  await h.turnEnd()
+
+  assert.equal(h.sent.length, 1)
+  assert.match(h.sent[0], /三垄正合适/)
+})
+
+test('中间一条正文全是心里话 —— 不清掉前面已经攒下的真话', async () => {
+  const h = makeHarness({ textReply: false })
+  h.fire({ content: [{ type: 'text', text: '这张旧的厅倒是暖，本姑娘就站在窗边那格等你' }] })
+  await h.tool('read')
+  // 这条只有盘算、且带沉默标记：以前走 set('') 会把上面那句一起抹了
+  h.fire({ content: [{ type: 'text', text: '（心里嘀咕：还要再说点什么呢）[SILENT]' }] })
+  await h.tool('read')
+  await h.turnEnd()
+
+  assert.equal(h.sent.length, 1)
+  assert.match(h.sent[0], /站在窗边那格等你/)
+})
+
+test('攒的正文有上限 —— 一轮最多 600 字，不会越攒越长', async () => {
+  const h = makeHarness({ textReply: false })
+  const big = '鲸'.repeat(400)
+  h.fire({ content: [{ type: 'text', text: big }] })
+  await h.tool('read')
+  h.fire({ content: [{ type: 'text', text: big }] })
+  await h.tool('read')
+  await h.turnEnd()
+
+  assert.equal(h.sent.length, 1)
+  assert.ok(h.sent[0].length <= 600, `兜底正文应 <=600 字，实际 ${h.sent[0].length}`)
 })

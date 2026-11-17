@@ -17,6 +17,7 @@ import { startLearning } from './learning.js'
 import { createContextGuard } from './context-guard.js'
 import { auditOutbound } from './audit.js'
 import { splitText, sleep } from './shared/chunk.js'
+import { cutSelfInjection } from './sanitize.js'
 import { registerTools } from './tools.js'
 import { ApprovalChannel } from './approval.js'
 import { QuestionChannel } from './questions.js'
@@ -347,7 +348,7 @@ const pin = createPin({ config, logger })
     // 提示词里已经写了「发不出去」，但光靠说会漏，这里硬拦一道。
     if (record?.quietRound) {
       logger.info(`[dsh-qq] ${record.label} 读书问询轮，这段不往外发`)
-      return
+      return { chunks: 0, messageId: 0 }
     }
     // 「这次不接话」：模型只输出 [SILENT] 就当作它选择潜水 —— 不发、不进历史、不报错。
     // 出口只在「这条不一定是在叫它」时给（见 inbound.js 的 mustReply），
@@ -356,17 +357,54 @@ const pin = createPin({ config, logger })
     // 2026-10-27 21:4x 修：原来只认「整条恰好就是 [SILENT]」，
     // 她要是写成「结束这轮，不再说话。[SILENT]」，标记根本不生效，前半句照发。
     // 现在先把标记剥掉：剥完只剩空白＝她选了潜水；还剩话＝照发剩下的。
-    const spoken = stripSilentMark(trimmed)
+    let spoken = stripSilentMark(trimmed)
+    // 2026-11-15 19:16 姐姐截图那次：老三把「【插件注入·每隔一阵钉一次·不是她说的】」
+    // 连着四行短规矩、一句假对白，自己写进了正文（不是插件发的，插件从不往正文里写注入）。
+    // 危险不在那几条字，在于它下次醒来会把这段当成「真注入」，照着执行自己编的规矩。
+    // 闸放在这里：所有正文出口（流式、整段、turn/end 兜底、qq_send 不带 to）都汇到 send()，
+    // 一处砍死；砍完还剩话就发剩下的，砍空了就当没这条，并留一句回执告诉它被拦了。
+    const selfInj = cutSelfInjection(spoken, { tag: record.injectTag })
+    if (selfInj.cut) {
+      // 第 2 道闸的分级（19:45）：带本轮码＝抄刚收到的、带旧码＝翻历史、没码＝照形状现编。
+      // 三种都在通知里报出来，日志里留痕——它到底是复读还是创作，只有这条线能看出来。
+      logger.warn(
+        `[dsh-qq] ${record.label} 正文里自写了插件注入标记（${selfInj.kind}），已砍掉：${selfInj.head}`,
+      )
+      try {
+        bridge?.noteSelfInjection?.(record, selfInj.head, selfInj.kind)
+      } catch (err) {
+        logger.debug?.(`自注入回执记录失败：${err?.message ?? err}`)
+      }
+      spoken = selfInj.text
+    }
     if (!spoken) {
       if (hasSilentMark(trimmed)) {
         logger.info(`[dsh-qq] ${record.label} 选择不接话（${SILENT_MARKER}）`)
         // 沉默不该扣主动开口的额度：机会白给，她想开口的话下次还有（2026-10-26）
         wake.noteProactiveSilent(record)
       }
-      return
+      return { chunks: 0, messageId: 0 }
     }
+    // 2026-11-07 12:48 姐姐：「越调用越多，根本没法停下来」。
+    // 现场：老大一轮里连发三条，其中「弄顺了就回来」和「说好了，弄顺了就回来」字面不一样，
+    // 5 秒同行去重拦不住。治标先上硬闸——一轮最多 3 条，到顶就停；
+    // 说话是给她听的，不是把这一轮攒的想法全倒出来。
+    // 轮数由 outbound.js 的 turn/end 清零（record._turnSends）。
+    if ((Number(record._turnSends) || 0) >= 3) {
+      logger.warn(`[dsh-qq] ${record.label} 这一轮已经发了 ${record._turnSends} 条，不再往下发`)
+      return { chunks: 0, messageId: 0 }
+    }
+    // 2026-11-06 20:35 姐姐定：同一句话 5 秒内不再发第二遍。
+    // 原来只在 qq_send 里拦；现在工具也走这里，搬过来一处管全部。
+    const prevSend = record._lastSend
+    const nowMs = Date.now()
+    if (prevSend && prevSend.text === spoken && nowMs - prevSend.at < 5000) {
+      logger.info(`[dsh-qq] ${record.label} 同一句话 5 秒内重复，跳过`)
+      return { chunks: 0, messageId: 0 }
+    }
+    record._lastSend = { text: spoken, at: nowMs }
     const chunks = splitText(spoken, config.textChunkLimit)
-    if (chunks.length === 0) return
+    if (chunks.length === 0) return { chunks: 0, messageId: 0 }
 
     // 外发审计：本机路径 / 凭据整条拦下。流式、整段、报错提示都从这里出去，
     // 所以闸放在 split 之后、真正调 OneBot 之前，一处堵死。
@@ -378,7 +416,7 @@ const pin = createPin({ config, logger })
         logger.warn(
           `[dsh-qq] ${record.label} 外发被审计拦下（${verdict.kind}）：${verdict.hit}`,
         )
-        return
+        return { chunks: 0, messageId: 0 }
       }
     }
     const isGroup = record.scope === 'group'
@@ -386,6 +424,8 @@ const pin = createPin({ config, logger })
     const target = isGroup ? { group_id: Number(record.peerId) } : { user_id: Number(record.peerId) }
     const rateKey = `${record.scope}:${record.peerId}`
     let sentAny = false
+    let sentCount = 0
+    let lastMessageId = 0
 
     // 群聊：两条回复之间拉开一点。一群人追着问的时候，
     // 连着往外吐最容易被人当成刷屏，也最容易被风控。
@@ -418,9 +458,17 @@ const pin = createPin({ config, logger })
         const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
         if (sentId > 0) record.lastSentMessageId = sentId
         sentAny = true
+        sentCount += 1
+        // 一轮内计数：turn/end 清零（见 outbound.js）
+        record._turnSends = (Number(record._turnSends) || 0) + 1
+        if (sentId > 0) lastMessageId = sentId
         // 真发出去了才算用掉一次主动开口的额度（回复不受影响：pending 只在主动轮有）
         wake.noteProactiveDelivered(record)
-        logger.info(`→ ${record.label}: ${chunks[index].slice(0, 60)}`)
+        // 2026-11-09：原来只记前 60 字。复盘 09:22「（抱住妹妹~亲）」那次才发现，脏东西常在 60 字之后，
+        // 日志里只剩开头，探针脚本拿不到原文，判据也就回归不了。全文记到 500 字，换行压成 ⏎ 保持一行。
+        logger.info(
+          `→ ${record.label}: ${String(chunks[index] ?? '').slice(0, 500).replace(/\s*\r?\n\s*/g, ' ⏎ ')}`,
+        )
       } catch (err) {
         logger.warn(`发送到 ${record.label} 失败:`, err?.message ?? err)
         // 回执：这句没送出去。下一轮投递时会告诉她「是通道断了，不是对方不理你」。
@@ -443,6 +491,7 @@ const pin = createPin({ config, logger })
     if (!isGroup) {
       client.call('set_input_status', { user_id: Number(record.peerId), event_type: 0 }, 5000).catch(() => {})
     }
+    return { chunks: sentCount, messageId: lastMessageId }
   }
 
   const approval = new ApprovalChannel({ manager, config, logger, send })
@@ -567,7 +616,7 @@ const pin = createPin({ config, logger })
   reading.start()
 
   try {
-    registerTools(ctx, { client, manager, config, logger, pin, wake, noteSelfSaid })
+    registerTools(ctx, { client, manager, config, logger, pin, wake, noteSelfSaid, send, bridge })
   } catch (err) {
     logger.warn('QQ 互动工具注册失败（聊天本身不受影响）:', err?.message ?? err)
   }

@@ -74,8 +74,9 @@ test('接线检查：带工具调用的 assistant/message 整条不发（09:53 �
   const idx = src.indexOf("if (type === 'assistant/message')")
   assert.ok(idx > 0)
   // 2026-11-04 23:50：[SILENT] 分支变长（自演信封那条路），窗口从 3000 放到 4500。
-  // 断言本身没放松——只是把切片范围跟着源码长度调。
-  const branch = src.slice(idx, idx + 4500)
+  // 2026-11-08 17:45：!textReplyEnabled 分支补回两道闸（主动轮不捞 / 带工具不捞），
+  // 又长了一截，4500 已经够不到后面的正文清洗那行，窗口放到 7000。断言本身没放松。
+  const branch = src.slice(idx, idx + 7000)
   assert.match(branch, /if \(hasToolUse\(data\.message\)\) \{/, '带工具的那条消息要在发送前就被挡掉，而不是清洗文字')
   assert.ok(branch.indexOf('hasToolUse(data.message)') < branch.indexOf('text = stripLeakedThinking'), '拦住的位置必须在清洗/发送之前')
 })
