@@ -1,6 +1,6 @@
 # dsh-qq-onebot
 
-把 **QQ** 接成 DeepSeek Harness 的一个前端：私聊、群聊都能和同一个 Agent 聊；语音听得懂、图片看得见，还能戳一戳、贴表情、点赞。
+把 **QQ** 接成 DeepSeek Harness 的一个前端：私聊、群聊都能和同一个 Agent 聊；语音听得懂、图片看得见、现成的音频文件能当语音条发出去，还能戳一戳、贴表情、点赞。
 
 底层走 [OneBot v11](https://github.com/botuniverse/onebot-11) 协议，默认搭配 [NapCat](https://napneko.github.io/)。不用公网 IP、不用备案、不用企业主体。
 
@@ -29,7 +29,8 @@
 | 群里默认 @ 才理 | 被某人 @ 过一次后 60 秒内不用再 @ 也能接（窗口按「群 + 人」算，别人蹭不到） |
 | 分得清谁在跟自己说话 | 引用算叫我、`[SILENT]` 可以不接、同类机器人单独开关、跳过的群消息也进上下文 |
 | 不会把自己聊丢 | 窗口快满时补回聊天规矩；再撑满就换新会话，旧的最近聊天先落盘再接上 |
-| 十个互动工具 | `qq_poke` / `qq_react` / `qq_like` / `qq_send_image` / `qq_send_file` / `qq_face` / `qq_mface` / `qq_reply` / `qq_send` / `qq_recall` |
+| 十六个互动工具 | `qq_poke` / `qq_react` / `qq_like` / `qq_send_image` / `qq_send_file` / `qq_send_voice` / `qq_voice` / `qq_face` / `qq_mface` / `qq_faces` / `qq_reply` / `qq_send` / `qq_recall` / `qq_group_history` / `qq_facts` / `qq_pin` |
+| 语音条只发现成文件 | `qq_send_voice` 发的是本机已有的音频，插件**不内置 TTS**、不会自己开口（见常见问题「它说不了话」） |
 | 问答能转回 QQ | `ask_user_question` 抛的问题会变成一条 QQ 消息，回个数字就行 |
 
 ## 三步跑通
@@ -215,6 +216,15 @@ NapCat 的 **WS 和 HTTP 是两个不同的 token**，填错不报错，只是�
 **语音没转出文字**
 先确认 `asrPython -c "import vosk"` 能过，再手动跑一次 `<asrPython> <asrScript> <音频文件> [模型目录]`。模型目录必须是**纯 ASCII 路径**（vosk 的 C++ 层不认中文路径）。
 
+**它说不了话 / 只能发文件（语音功能目前不完整）**
+`qq_send_voice({ file })` 干的事是「把本机已有的音频文件当语音条发出去」，**它不是语音合成**——插件里没有 TTS，也不会自己造声音。想让它开口，得在插件外面配一套合成，再把生成好的 wav 路径交给 `qq_send_voice`：
+
+- 最省事的是系统自带的 **Windows SAPI**（`Add-Type -AssemblyName System.Speech` + `SpeechSynthesizer`），离线、零依赖、中文女声 Huihui / 男声 Kangkang，十几秒的句子不到 1 秒就出 wav；
+- 想要自然一点用 **edge-tts**（微软在线音色，免费，需要 Python + 联网）；
+- 想要特定角色的音色，再加一层 **RVC**（语音换声）或 **GPT-SoVITS**（直接克隆音色）——这两个都需要自备模型权重，RVC 在 Windows 上原版走 CUDA（N 卡），AMD 卡只能走 DirectML/ONNX 或者 CPU，速度会慢不少。
+
+为什么没塞进插件：TTS 引擎、模型权重、显卡、音色偏好全因人而异，打包进来只会让安装更难；「发一条现成语音」这条链才是通用那部分。如果你愿意把 TTS 挂在插件外层（用 `pwsh` 跑 SAPI、或调用你自己的合成服务），插件这边不需要改任何东西。
+
 **记忆存在哪 / 会不会和宿主串**
 默认 `isolateByPeer: true`：私聊在 `<workspaceRoot>/会话/私聊_<QQ号>/`，群在 `群_<群号>/`，第一次用自动铺好 `AGENTS.md` + `记忆区/`。想共用宿主目录就设 `false`。
 
@@ -230,6 +240,7 @@ NapCat 的 **WS 和 HTTP 是两个不同的 token**，填错不报错，只是�
 | NapCat | v4.x（推荐 `NapCat.Shell.Windows.OneKey` 独立版） |
 | 一个 QQ 小号 | 别用主号，真的 |
 | （可选）vosk + numpy | 只有想让语音自动转文字才要；不装也行，语音会标成「没听清」 |
+| （可选）TTS / RVC | 只有想让「它自己说话」才要；插件本身只发已有音频文件，不带语音合成 |
 
 ## 放出去之前，逐条确认
 

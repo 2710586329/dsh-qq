@@ -2,6 +2,16 @@
 
 本文件记录 dsh-qq 的版本变更。格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号照 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 文档
+
+- **README 把语音功能的边界写清楚**（2026-11-17 姐姐定的：「标注一下语音现在不够完全，提醒用户要使用语音得自己装载 tts 和 rvc，目前咱们的语音只能发已经有的音频文件」）：
+  - 常见问题新增「**它说不了话 / 只能发文件（语音功能目前不完整）**」：`qq_send_voice` 只发本机已有音频，不是合成；想让「它自己说话」，得在插件外面接 TTS（Windows SAPI / edge-tts），想要特定音色再叠 RVC 或 GPT-SoVITS，模型自备；
+  - 功能表补一行「语音条只发现成文件」，互动工具清单从「十个」更正成实际的十六个（1.4.0 加了 `qq_send_voice` / `qq_voice`，加上 `qq_facts` / `qq_pin` / `qq_faces` / `qq_group_history`）；
+  - 「装之前」加一行可选依赖 TTS / RVC。
+- 起因：语音条发出去之后发现只能拿现成文件、插件侧没有合成能力；本机还是 AMD 卡（没有 CUDA），RVC 只能走 DirectML/ONNX 或 CPU，本地没法舒服地验证音色替换——所以合成这件事延后，先把边界写清楚，别人踩之前就知道要自己准备什么。
+
 ## [1.4.0] - 2026-11-17
 
 ### 修复
