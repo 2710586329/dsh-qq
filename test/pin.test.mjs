@@ -37,7 +37,7 @@ test('add 一条：view 里有抬头和内容，文件真的写出来了', () =>
     assert.equal(openCount, 1)
     assert.ok(existsSync(join(dir, '话头.md')))
     const view = pin.view(rec(dir))
-    assert.ok(view[0].includes('[话头]'))
+    assert.ok(view[0].includes('[插件注入·你自己的便签'))
     assert.ok(view.some((line) => line.includes('会话一直保持')))
   })
 })

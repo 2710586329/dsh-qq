@@ -130,15 +130,15 @@ test('多群按群号排；没记录 / 目录不存在 → 空串', () => {
 test('buildChatPrompt：纸条只进私聊，群聊不塞', () => {
   const digest = '· 群 123456789：最后 00:08:57 某人 说「随便说的一句」'
   const priv = buildChatPrompt({}, { isGroup: false, groupDigest: digest })
-  assert.ok(priv.includes('【今天群里发生过'), '私聊该有纸条')
+  assert.ok(priv.includes('【插件注入·群尾巴纸条'), '私聊该有纸条')
   assert.ok(priv.includes('这不是你翻出来的'), '得点明这是插件递的，不是她翻的本子')
   assert.ok(priv.includes('照实说不知道'), '纸条上没有的别编')
 
   const grp = buildChatPrompt({}, { isGroup: true, groupDigest: digest })
-  assert.ok(!grp.includes('【今天群里发生过'), '她在那个群里，用不着替她讲')
+  assert.ok(!grp.includes('【插件注入·群尾巴纸条'), '她在那个群里，用不着替她讲')
 
   const none = buildChatPrompt({}, { isGroup: false, groupDigest: '' })
-  assert.ok(!none.includes('【今天群里发生过'), '没内容就别占 token')
+  assert.ok(!none.includes('【插件注入·群尾巴纸条'), '没内容就别占 token')
 })
 
 test('接线：inbound 只在私聊里读纸条，且按本地日期找、带上自己的号', () => {

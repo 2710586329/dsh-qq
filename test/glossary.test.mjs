@@ -76,14 +76,14 @@ test('loadGlossaryFor：文件在就读得到，文件不在返回空串', () =>
 
 test('buildChatPrompt：群里会带上群词典，私聊不带', () => {
   const inGroup = buildChatPrompt({}, { isGroup: true, glossary: '## 待确认\n- [ ] 某某：啥意思', glossaryFile: 'x/群词典.md' })
-  assert.ok(inGroup.includes('【群词典'), '群里应该注入')
+  assert.ok(inGroup.includes('【插件注入·群词典'), '群里应该注入')
   assert.ok(inGroup.includes('你自己记的笔记'), '别让它以为是别人塞的规矩')
 
   const inPrivate = buildChatPrompt({}, { isGroup: false, glossary: '## 待确认\n- [ ] 某某：啥意思' })
-  assert.ok(!inPrivate.includes('【群词典'), '私聊不该把某个群的词带进来')
+  assert.ok(!inPrivate.includes('【插件注入·群词典'), '私聊不该把某个群的词带进来')
 
   const empty = buildChatPrompt({}, { isGroup: true, glossary: '' })
-  assert.ok(!empty.includes('【群词典'), '没内容就别占 token')
+  assert.ok(!empty.includes('【插件注入·群词典'), '没内容就别占 token')
 })
 
 test('接线：inbound 只在群聊里取词典，私聊传空串', () => {

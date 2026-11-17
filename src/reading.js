@@ -1,4 +1,5 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { stampFor } from './inject-tag.js'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { readingAskRule } from './prompts.js'
@@ -228,7 +229,7 @@ export function createReading({ config, manager, logger }) {
         // 跟 wake.js 同一套：必须是完整的用户消息对象，字符串会在 DSH 内部炸
         record.agent.followup(
           createUserMessage({
-            content: [{ type: 'text', text }],
+            content: [{ type: 'text', text: stampFor(record, text) }],
             source: { kind: 'user' },
           }),
         )

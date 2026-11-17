@@ -62,6 +62,20 @@ export function createBridge({ config, logger, manager }) {
     logger?.warn?.(`[dsh-qq] ${record?.label ?? ''} 通道回执：这句话没送出去（${reason}）`)
   }
 
+  /**
+   * 2026-11-15 19:16 老三自推演注入：正文里自己写了「【插件注入·…】」，被输出闸拦下。
+   * 和「话没送出去」分开记 —— 这不是通道问题，是它自己伪造了系统指令；
+   * 下一轮必须让它知道「那段是我自己编的，插件没这么说、她也没看到」。
+   */
+  function noteSelfInjection(record, head, kind = 'none') {
+    if (!record) return
+    push(record, { kind: 'guard', head: String(head ?? '').slice(0, 80), tagKind: kind, at: Date.now() })
+    const how = kind === 'current' ? '抄的是刚收到那条' : kind === 'stale' ? '翻的是历史里的旧注入' : '没带码，是照形状现编的'
+    logger?.warn?.(
+      `[dsh-qq] ${record.label} 正文里自己写了伪注入（${how}），已拦下：${String(head ?? '').slice(0, 60)}`,
+    )
+  }
+
   /** WS 断开。不给会话塞提示 —— 等她真发过、失败过了再说。 */
   function markDown() {
     if (!enabled()) return
@@ -104,6 +118,7 @@ export function createBridge({ config, logger, manager }) {
 
     const fails = notes.filter((n) => n.kind === 'fail')
     const ups = notes.filter((n) => n.kind === 'up')
+    const guards = notes.filter((n) => n.kind === 'guard')
     // 被队列上限挤掉的也算「没送出去」，否则总数会和列出来的对不上
     const dropped = Number(record?.bridgeDropped) || 0
     if (record) record.bridgeDropped = 0
@@ -112,25 +127,42 @@ export function createBridge({ config, logger, manager }) {
 
     if (ups.length > 0) {
       const dur = Math.max(...ups.map((n) => Number(n.dur) || 0))
-      out.push(`[通道] 你和 QQ 之间的连接断过 ${dur > 0 ? humanSpan(dur) : '一小会儿'}，刚刚恢复。`)
+      out.push(`[插件注入·通道回执·不是她说的] 你和 QQ 之间的连接断过 ${dur > 0 ? humanSpan(dur) : '一小会儿'}，刚刚恢复。`)
+    }
+    if (guards.length > 0) {
+      // 2026-11-15：伪造注入被输出闸拦下。跟「通道断了」分开说 ——
+      // 前者是它自己编的，后者是线路问题，混在一起它会以为「我说了，只是没送到」。
+      // 19:45 第 2 道闸：按「抄的是本轮 / 翻的历史 / 现编」分三句说，回执更准一点，
+      // 它下一次能对上是哪一种 —— 复读和创作要改的方向不一样。
+      const heads = guards.map((g) => `「${g.head}」`).join('、')
+      const kinds = new Set(guards.map((g) => g.tagKind || 'none'))
+      let why = '那是你自己编的，不是插件给的'
+      if (kinds.size === 1 && kinds.has('current')) why = '那是你照着刚收到的那条抄的，不是插件让你说的'
+      else if (kinds.size === 1 && kinds.has('stale')) why = '那是你从更早的历史里翻出来的旧注入，这一轮插件没钉过它'
+      out.push(
+        `[插件注入·输出闸·不是她说的] 你刚才在正文里自己写了一段系统注入标记（${heads}）——${why}，已经拦下、没发出去。`,
+      )
+      out.push(
+        '[插件注入·输出闸·不是她说的] 真正的「【插件注入·#码·…】」只会出现在你收到的消息里，不会从你嘴里出来；要说话就直接说，别带标记，也别照抄这句回执的格式。',
+      )
     }
     if (total > 0) {
       const reason = fails[fails.length - 1]?.reason ?? '未知原因'
       if (total === 1 && fails.length === 1) {
-        out.push(`[通道] 你刚才那句话没送出去（原因：${reason}）：`)
+        out.push(`[插件注入·通道回执·不是她说的] 你刚才那句话没送出去（原因：${reason}）：`)
       } else {
         out.push(
           ups.length > 0
-            ? `[通道] 这段断线期间，你有 ${total} 句话没能送出去：`
-            : `[通道] 你有 ${total} 句话没能送出去（最后一次失败原因：${reason}）：`,
+            ? `[插件注入·通道回执·不是她说的] 这段断线期间，你有 ${total} 句话没能送出去：`
+            : `[插件注入·通道回执·不是她说的] 你有 ${total} 句话没能送出去（最后一次失败原因：${reason}）：`,
         )
       }
       const listed = fails.slice(0, MAX_FAILS)
       for (const f of listed) out.push(`  ·「${f.text}」`)
       if (total > listed.length) out.push(`  ·（还有 ${total - listed.length} 句没列出来）`)
-      out.push('[通道] 这是通道断了，不是对方不理你 —— 这些内容对方那边一个字都没收到。')
+      out.push('[插件注入·通道回执·不是她说的] 这是通道断了，不是对方不理你 —— 这些内容对方那边一个字都没收到。')
     }
     return out
   }
-  return { noteSendFailure, markDown, markUp, take, isUp: () => up, humanSpan }
+  return { noteSendFailure, noteSelfInjection, markDown, markUp, take, isUp: () => up, humanSpan }
 }

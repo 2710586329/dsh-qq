@@ -1,4 +1,5 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { stampFor } from './inject-tag.js'
 import { bedtimeRule, morningRule } from './prompts.js'
 
 /**
@@ -172,7 +173,7 @@ export function createSleep({ config, manager, logger }) {
     if (st.remindedOn === dk) return ''
     st.remindedOn = dk
     logger.info?.(`[dsh-qq] ${record.label} 补一句睡前提醒（错过了 ${hmText(bed)} 那个点）`)
-    return `[提醒] 已经 ${hmText(cur)} 了，${hmText(bed)} 就该睡了。回她的时候顺口催一句早点休息，一句就够，别说教。`
+    return `[插件注入·睡前提醒·不是她说的] 已经 ${hmText(cur)} 了，${hmText(bed)} 就该睡了。回她的时候顺口催一句早点休息，一句就够，别说教。`
   }
 
   function forget(record) {
@@ -186,7 +187,7 @@ export function createSleep({ config, manager, logger }) {
       try {
         record.agent.followup(
           createUserMessage({
-            content: [{ type: 'text', text }],
+            content: [{ type: 'text', text: stampFor(record, text) }],
             source: { kind: 'user' },
           }),
         )

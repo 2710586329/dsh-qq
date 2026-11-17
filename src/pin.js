@@ -66,7 +66,7 @@ export function createPin({ config, logger } = {}) {
         .slice(0, MAX_SHOWN)
         .map((line) => `· ${bodyOf(line).slice(0, MAX_LEN)}`)
       const rest = open.length > MAX_SHOWN ? [`（还有 ${open.length - MAX_SHOWN} 条没列）`] : []
-      return ['[话头] 你自己钉住的、还没接上的（别念出来，接得上就接着聊）:', ...shown, ...rest]
+      return ['[插件注入·你自己的便签·不是她说的] 你自己钉住的、还没接上的（别念出来，接得上就接着聊）:', ...shown, ...rest]
     } catch (err) {
       logger?.warn?.(`读便签失败: ${err?.message ?? err}`)
       return []

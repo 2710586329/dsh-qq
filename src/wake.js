@@ -1,4 +1,5 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { stampFor } from './inject-tag.js'
 import { proactiveRule } from './prompts.js'
 import { doorLine } from './door.js'
 import { listOf } from './config.js'
@@ -194,7 +195,7 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
         // content[0].kind 会拿到 undefined，整轮直接抛 Cannot read properties of undefined。
         record.agent.followup(
           createUserMessage({
-            content: [{ type: 'text', text }],
+            content: [{ type: 'text', text: stampFor(record, text) }],
             source: { kind: 'user' },
           }),
         )
@@ -269,6 +270,9 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
       // 满足条件的有几个就在同一毫秒打出去几个（2026-10-30 19:40 那次 8 个）。
       const candidates = []
       for (const record of manager.list()) {
+        // 2026-11-08 姐姐定：群里不主动冒泡（被叫 / 被点名才开口）；私聊的主动问询照旧。
+        // 主动轮原来不分 scope，群会话安静够久也会被塞一次「可以开口了」——那正是要关掉的。
+        if (config?.proactiveGroupEnabled === false && record.scope === 'group') continue
         const st = stateOf(record)
         // 上一轮机会投出去，却既没发话也没给 [SILENT]（那一轮报错退出了）：
         // 过了投递超时就当没发生过，别让 pending 一直挂着。

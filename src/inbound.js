@@ -15,6 +15,7 @@ import {
 import { resolvePeerWorkspace } from './workspace.js'
 import { listOf } from './config.js'
 import { appendChatLog, CHATLOG_DIR, UNAUTHORIZED_LOG_DIR } from './chatlog.js'
+import { stampFor } from './inject-tag.js'
 import { mkdir, writeFile, readdir, unlink } from 'node:fs/promises'
 import { join, extname } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -548,8 +549,11 @@ export function createInbound({ config, manager, logger, client, send, approval,
    * 投递一轮。单条消息和「连发合并」后的整段，走的是同一条路。
    */
   function runTurn({ record, label, peerId, isGroup, client, body, maxTurnMs }) {
+    // 2026-11-15 19:45 第 2 道闸：投递前给所有「【插件注入·…】」段落盖一个本轮随机码。
+    //   这样历史里那几十条注入的码各不相同，它抄哪一条都不是「这一轮」的；
+    //   输出侧据此分得清「抄最新的 / 翻历史的 / 现编的」。细节见 inject-tag.js。
     const message = createUserMessage({
-      content: [{ type: 'text', text: body }],
+      content: [{ type: 'text', text: stampFor(record, body) }],
       source: { kind: 'user' },
     })
     const startedAt = Date.now()
@@ -904,7 +908,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
       // ⭐ 2026-10-25 P2：/reset 也带上交接，别让「重新来过」真把刚才聊的忘干净。
       const handoff = loadHandoffFor(record)
       const seed = handoff
-        ? ['[这是你刚才自己留的便签（不是姐姐说的话）——接着聊就行，不用从头解释]', handoff]
+        ? ['[插件注入·这是你刚才自己留的便签·不是她说的——接着聊就行，不用从头解释]', handoff]
         : null
       const ok = manager.reset(record, seed)
       logger.info?.(`[dsh-qq] 收到 /reset（${label}），reset=${ok}，交接=${handoff ? '有' : '无'}`)
@@ -1164,7 +1168,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
       // 主动换过会话：把上一段聊天的尾巴放最前面，让它知道刚聊到哪
       if (Array.isArray(record.swapSeed) && record.swapSeed.length > 0) {
         parts.unshift(
-          '[你刚才自己留的便签 / 最近几句话——还是你，换了个地方接着聊，不是死了，是换个海洋接着游，不用从头解释]',
+          '[插件注入·你刚才自己留的便签 / 最近几句话·不是她说的——还是你，换了个地方接着聊，不是死了，是换个海洋接着游，不用从头解释]',
           ...record.swapSeed,
           '[刚才那段聊到这里]',
           '',

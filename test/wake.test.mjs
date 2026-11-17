@@ -251,6 +251,37 @@ function makeConfig(over = {}) {
   w.stop()
 }
 
+// ── 群聊不主动（2026-11-08 姐姐定：「群聊主动发消息先关了」——
+//     群里只在被叫 / 被点名时开口，私聊的冷场冒泡照旧）──
+{
+  const g = fakeRecord('群里的', 60 * 60 * 1000, 'group')
+  const p = fakeRecord('私聊的', 60 * 60 * 1000, 'private')
+  const m = fakeManager([g, p])
+  const w = createWake({
+    config: makeConfig({ proactiveGroupEnabled: false }),
+    manager: m,
+    logger: {},
+    staggerMs: 0,
+  })
+  w.start()
+  w.tick()
+  await new Promise((r2) => setTimeout(r2, 30))
+  check('群聊不主动开口，只开口私聊', m.fired, ['私聊的'])
+  w.stop()
+}
+
+// 不配这个字段时（默认）群聊照旧参与——上面第 2 段「冷场群」就是钉子
+{
+  const g = fakeRecord('默认群', 60 * 60 * 1000, 'group')
+  const m = fakeManager([g])
+  const w = createWake({ config: makeConfig(), manager: m, logger: {}, staggerMs: 0 })
+  w.start()
+  w.tick()
+  await new Promise((r2) => setTimeout(r2, 30))
+  check('不配 proactiveGroupEnabled 时群聊照旧开口', m.fired, ['默认群'])
+  w.stop()
+}
+
 // ── 提示词 ──
 {
   const groupText = proactiveRule({}, { label: '测试群', silentMin: 32, isGroup: true, now: new Date(2026, 9, 24, 20, 40) })
