@@ -35,3 +35,7 @@ test/ws-probe.mjs
 # 本地快照（发布前备份，不进仓库）
 快照/
 .tmp/
+
+# 一次性探针（2026-11-17 排查 issue 时写的临时脚本，不进仓库）
+_probe*.cjs
+_rule-audit*.mjs
