@@ -16,14 +16,14 @@ import {
   appendFileSync,
   mkdirSync,
 } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { join, dirname, resolve, relative, isAbsolute } from 'node:path'
 
 import { pickFace, keepFace, facesCount, faceSendState, markFaceSent, listFaces } from './faces.js'
 import { appendFact, upsertGlossaryTerm } from './settings.js'
 import { auditOutbound } from './audit.js'
 import { lookupMeme } from './meme.js'
-import { downloadImage } from './inbound.js'
+import { downloadImage, lastImageMessageIdOf, lastVoiceMessageIdOf, runAsr } from './inbound.js'
 import { stripLeakedThinking } from './outbound.js'
 import { hasSilentMark, stripSilentMark } from './prompts.js'
 import { cutSelfInjection } from './sanitize.js'
@@ -96,10 +96,21 @@ const REACT_DESC =
 
 const IMAGES_DESC =
   '把某条 QQ 消息里的图片重新取回来看（按消息 id）。' +
-  '消息正文里只会出现一个 `[图片]` 占位——那一刻没被叫醒、或者当时没顾上看，' +
-  '事后用这个工具还能把那张图捞回来。' +
-  '聊天流水里每行末尾有 `#msg=123456`，那就是这条消息的 id；不填 id 就是最近收到的这一条。' +
+  '正常情况下图已经随消息一起给你看了，这条是「当时没顾上看 / 想再看一遍」时用的兜底。' +
+  '聊天流水里每行末尾有 `#msg=123456`，那就是这条消息的 id；' +
+  '不填 id 就找**这个会话最近一条带图的消息**（不是最近一条消息——群里别人发完图再单独 @ 你时，' +
+  '最近一条是那条 @，图在更早那条里）。' +
   '拿回来的是本机文件路径，接着用 read_image 打开就能看见。一次最多四张。'
+
+const SEND_VOICE_DESC =
+  '发一条语音条（QQ 里那种按住说话的语音）。给本机音频文件路径：wav / mp3 / amr / silk / ogg 都行，' +
+  'NapCat 自己转成语音格式。一条通常十几秒、几十 KB——别拿它念长文，长文用 qq_send。'
+
+const VOICE_DESC =
+  '把某条 QQ 语音存成本机 wav，开了 asrEnabled 时顺手转成文字给你看。' +
+  '收到语音时正文里写着「[语音转文字] …（#msg=123456）」，那个 id 就是这里的 message_id；' +
+  '不填 id 就找**这个会话最近一条语音**（不是最近一条消息——群里别人说完语音再单独 @ 你时，最近一条是那条 @）。' +
+  '本机那支 wav 得靠宿主给的音频工具才能听，拿不到的话至少还能读转出来的文字。'
 
 const LIKE_DESC =
   '给对方的 QQ 名片点赞（就是资料页的那个赞）。每天每人最多 10 次，' +
@@ -618,7 +629,11 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
-      const messageId = Number(args?.message_id ?? record.lastMessageId ?? 0)
+      // 不填 id：先找「这个会话最近一条带图的消息」，再退回 lastMessageId（老行为）。
+      // 2026-11-17, issue #10：群里「先发图、再单发一条 @」时，lastMessageId 是那条 @，
+      // 照着它去取只会得到「这条消息里没有图片」。
+      const asked = Number(args?.message_id ?? 0)
+      const messageId = asked > 0 ? asked : lastImageMessageIdOf(record.peerId) || Number(record.lastMessageId ?? 0)
       if (!Number.isFinite(messageId) || messageId <= 0) {
         throw new Error('qq_images: 不知道要看哪条消息')
       }
@@ -704,6 +719,157 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
       } catch (err) {
         logger.warn?.(`qq_like 失败: ${err?.message ?? err}`)
         return { ok: false, target: String(target) }
+      }
+    },
+  })
+
+  tools.register({
+    name: 'qq_send_voice',
+    description: SEND_VOICE_DESC,
+    parameters: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', description: '音频文件的绝对路径（wav / mp3 / amr / silk / ogg / flac / m4a）' },
+      },
+      required: ['file'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: { ok: { type: 'boolean' }, target: { type: 'string' }, reason: { type: 'string' } },
+        required: ['ok', 'target'],
+        additionalProperties: false,
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text: value.ok ? `语音已发到 ${value.target}` : `语音没发出去${value.reason ? `：${value.reason}` : ''}`,
+        },
+      ],
+    },
+    async execute(args, exec) {
+      const record = needRecord(manager, exec)
+      assertQuiet(record)
+      const file = String(args?.file ?? '').trim()
+      if (!file) throw new Error('qq_send_voice: file 不能为空')
+      // issue #6：NapCat 的 record 段只吃音频。先按后缀挡一道，
+      // 别把 pdf 当语音丢过去——那种失败在 QQ 那侧只会静默。
+      if (!/\.(silk|amr|wav|mp3|ogg|flac|m4a|aac)$/i.test(file)) {
+        return { ok: false, target: record.label, reason: '只发音频文件（wav / mp3 / amr / silk / ogg / flac / m4a）' }
+      }
+      const info = await stat(file).catch(() => null)
+      if (!info?.isFile()) return { ok: false, target: record.label, reason: '这个路径上没有文件' }
+      if (info.size > 10 * 1048576) {
+        return { ok: false, target: record.label, reason: '音频超过 10 MB，QQ 那边也发不动' }
+      }
+      const action = record.scope === 'group' ? 'send_group_msg' : 'send_private_msg'
+      try {
+        await client.call(action, {
+          ...peerOf(record),
+          message: [{ type: 'record', data: { file } }],
+        })
+        noteToolSent(record, '[语音]')
+        return { ok: true, target: record.label }
+      } catch (err) {
+        logger.warn?.(`qq_send_voice 失败: ${err?.message ?? err}`)
+        return { ok: false, target: record.label, reason: String(err?.message ?? err) }
+      }
+    },
+  })
+
+  tools.register({
+    name: 'qq_voice',
+    description: VOICE_DESC,
+    parameters: {
+      type: 'object',
+      properties: {
+        message_id: {
+          type: 'integer',
+          description: '可选：哪条语音（流水里 `#msg=` 后面那串）。不填就是最近一条语音。',
+        },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          messageId: { type: 'integer' },
+          path: { type: 'string' },
+          text: { type: 'string' },
+          message: { type: 'string' },
+        },
+        required: ['ok', 'messageId', 'path', 'text', 'message'],
+        additionalProperties: false,
+      },
+      render: (_args, value) => [{ type: 'text', text: value.message }],
+    },
+    async execute(args, exec) {
+      const record = needRecord(manager, exec)
+      // 不填 id：先找「这个会话最近一条语音」，再退回 lastMessageId。
+      const asked = Number(args?.message_id ?? 0)
+      const messageId = asked > 0 ? asked : lastVoiceMessageIdOf(record.peerId) || Number(record.lastMessageId ?? 0)
+      if (!Number.isFinite(messageId) || messageId <= 0) throw new Error('qq_voice: 不知道要听哪条语音')
+      const fail = (message) => ({ ok: false, messageId, path: '', text: '', message })
+
+      // 先拿到那条消息里的 record 段：get_record 要的是段里的 file，不是 message_id。
+      let file = ''
+      try {
+        const data = await client.call('get_msg', { message_id: messageId })
+        const segs = Array.isArray(data?.message)
+          ? data.message
+          : Array.isArray(data?.data?.message)
+            ? data.data.message
+            : []
+        const seg = segs.find((s) => s?.type === 'record')
+        if (seg) {
+          file = String(seg.data?.file ?? '') || String(seg.data?.url ?? '') || String(seg.data?.path ?? '')
+        }
+      } catch (err) {
+        logger.warn?.(`qq_voice 取消息失败: ${err?.message ?? err}`)
+        return fail(`取不到那条消息：${err?.message ?? err}`)
+      }
+      if (!file) return fail('这条消息里没有语音')
+
+      const cacheDir = record.dir
+        ? join(record.dir, '语音缓存')
+        : join(String(config?.cwd ?? '').trim() || process.cwd(), '语音缓存')
+      await mkdir(cacheDir, { recursive: true }).catch(() => {})
+      let wavPath = ''
+      try {
+        const res = await client.call('get_record', { file, out_format: 'wav' }, 20000)
+        if (res?.file && /^[A-Za-z]:[\\/]/.test(String(res.file))) {
+          wavPath = String(res.file)
+        } else if (res?.base64) {
+          wavPath = join(cacheDir, `voice-${messageId}.wav`)
+          await writeFile(wavPath, Buffer.from(String(res.base64), 'base64'))
+        } else if (res?.url) {
+          wavPath = (await downloadImage(String(res.url), cacheDir, 32)) || ''
+        }
+      } catch (err) {
+        logger.warn?.(`qq_voice 转码失败: ${err?.message ?? err}`)
+        return fail(`转 wav 失败：${err?.message ?? err}`)
+      }
+      if (!wavPath) return fail('转 wav 没成功（NapCat 那边可能缺 ffmpeg）')
+
+      let text = ''
+      if (config?.asrEnabled) {
+        try {
+          text = await runAsr(config, wavPath)
+        } catch (err) {
+          logger.warn?.(`qq_voice 识别失败: ${err?.message ?? err}`)
+        }
+      }
+      return {
+        ok: true,
+        messageId,
+        path: wavPath,
+        text,
+        message: text
+          ? `听清了（#msg=${messageId}）：${text}\n本机 wav：${wavPath}`
+          : `存成 wav 了（#msg=${messageId}）：${wavPath}`,
       }
     },
   })
@@ -1421,7 +1587,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
   })
 
   logger.info?.(
-    `QQ 互动工具已注册：qq_facts / qq_pin / qq_poke / qq_react / qq_like / qq_send_image / qq_send_file / qq_face / qq_mface / qq_faces / qq_reply / qq_send / qq_recall / qq_group_history（表情包收藏 ${facesCount(config)} 个）`,
+    `QQ 互动工具已注册：qq_facts / qq_pin / qq_poke / qq_react / qq_like / qq_send_image / qq_send_file / qq_send_voice / qq_voice / qq_face / qq_mface / qq_faces / qq_reply / qq_send / qq_recall / qq_group_history（表情包收藏 ${facesCount(config)} 个）`,
   )
   // 2026-10-30：qq_memo 是可选注册的（要配 memoryRoot），单独报一行，方便下次一眼看出这支笔通没通
   logger.info?.(

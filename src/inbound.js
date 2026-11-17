@@ -15,7 +15,9 @@ import {
 import { resolvePeerWorkspace } from './workspace.js'
 import { listOf } from './config.js'
 import { appendChatLog, CHATLOG_DIR, UNAUTHORIZED_LOG_DIR } from './chatlog.js'
-import { stampFor } from './inject-tag.js'
+import { newInjectTag, stampFor, stampInjections } from './inject-tag.js'
+// 2026-11-17（issue #10）：图片走原生附件，见 native-images.js 里的说明。
+import { joinContent, loadImages, loadImagesFromPaths } from './native-images.js'
 import { mkdir, writeFile, readdir, unlink } from 'node:fs/promises'
 import { join, extname } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -28,7 +30,7 @@ const DEFAULT_ASR_SCRIPT = fileURLToPath(new URL('../tools/asr.py', import.meta.
  * 跑一次离线 ASR：python asr.py <wav> [model] → {ok, text}
  * 任何异常都吞掉返回空串，绝不让语音把主链路拖死。
  */
-function runAsr(config, wavPath) {
+export async function runAsr(config, wavPath) {
   return new Promise((resolve) => {
     const py = config.asrPython || 'python'
     const script = config.asrScript || DEFAULT_ASR_SCRIPT
@@ -359,6 +361,18 @@ export function historyLine(sender, text, { isOwner = false, ownerLabel = '主�
   return `⟨${name} (${sender?.user_id ?? ''})${tag} ${historyTime()}⟩ ${body}`
 }
 
+/**
+ * 私聊首行里「对面是谁」（2026-11-17 修 issue #9）。
+ * 同一个机器人号先后跟两个人私聊时，只靠 sessionLabel 会撞成同一个标题；
+ * 带上对方昵称和 QQ 号，DSH 的会话标题一眼就能分开。
+ */
+export function peerLabelOf(record) {
+  const name = String(record?.lastSenderName ?? '').trim()
+  const id = record?.lastSenderId
+  if (!name && !id) return ''
+  return id ? `${name || 'QQ'}(${id})` : name
+}
+
 /** 往会话历史里塞一条，顺手按 historyLimit 截断（留两倍余量给「我」和「别人」混排）。 */
 export function pushHistory(record, entry, limit) {
   if (!record || !entry) return
@@ -379,6 +393,39 @@ export function pushHistory(record, entry, limit) {
  */
 const groupBacklog = new Map()
 const BACKLOG_MAX = 30
+
+/**
+ * 「这个会话最近一条带图 / 带语音的消息」是哪个 id（2026-11-17, issue #10 / #6）。
+ * 群里「先发图、再单发一条 @」时，图那条往往没被叫醒，
+ * `record.lastMessageId` 指的是后来那条 @ ——
+ * `qq_images` / `qq_voice` 不填 id 就会去看错消息，然后回一句「这条消息里没有图片」。
+ */
+const lastSpecialMessage = new Map()
+
+function rememberMessageId(peerId, kind, messageId) {
+  const id = Number(messageId) || 0
+  if (id > 0) lastSpecialMessage.set(`${peerId}:${kind}`, id)
+}
+
+function recallMessageId(peerId, kind) {
+  return lastSpecialMessage.get(`${peerId}:${kind}`) ?? 0
+}
+
+export function noteImageMessage(peerId, messageId) {
+  rememberMessageId(peerId, 'image', messageId)
+}
+
+export function lastImageMessageIdOf(peerId) {
+  return recallMessageId(peerId, 'image')
+}
+
+export function noteVoiceMessage(peerId, messageId) {
+  rememberMessageId(peerId, 'voice', messageId)
+}
+
+export function lastVoiceMessageIdOf(peerId) {
+  return recallMessageId(peerId, 'voice')
+}
 
 export function keepBacklog(groupId, entry) {
   if (!groupId || !entry) return
@@ -531,7 +578,7 @@ async function pruneCache(cacheDir, keepFiles = 200) {
  *
  * 触发规则全部走配置，插件自己不做「猜你还想聊」这种自作聪明的事。
  */
-export function createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep, bridge, pin }) {
+export function createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep, bridge, pin, getAttachments }) {
   // 没配 imageCacheDir 时落在工作目录下的「图片缓存」；每个会话再各占一层子目录（见下）
   const baseCacheDir =
     String(config.imageCacheDir ?? '').trim() ||
@@ -546,16 +593,39 @@ export function createInbound({ config, manager, logger, client, send, approval,
   const mergeBatches = new Map()
 
   /**
+   * 这一轮要投递的内容块。
+   *  - `body` 是字符串 → 一个文本块（老路径，没图）
+   *  - `body` 是数组 → 里面已经有图片块（图文保持原顺序）
+   * 带图时交给宿主附件服务做准入（数量 / 体积 / 格式）；过不了就回一句让人重发，
+   * 别把「塞不进去的图」硬投出去——那样模型看到的是残缺的上下文。
+   * 2026-11-17 修 issue #10。
+   */
+  async function admitBody(record, body) {
+    if (!Array.isArray(body)) return [{ type: 'text', text: stampFor(record, body) }]
+    // 一轮只发一个码：先把码造出来，再逐块盖（stampFor 会再造一个，块一多码就串了）
+    const tag = newInjectTag()
+    if (record && typeof record === 'object') record.injectTag = tag
+    const content = body.map((b) => (b?.type === 'text' ? { ...b, text: stampInjections(b.text, tag) } : b))
+    if (!content.some((b) => b?.type === 'image')) return content
+    const store = getAttachments?.()
+    if (!store?.admitPromptContent) return content // 宿主没给附件服务：至少文字还在
+    try {
+      return await store.admitPromptContent(content)
+    } catch (err) {
+      logger.warn?.(`[dsh-qq] 图片准入失败 ${record?.label ?? ''}: ${err?.message ?? err}`)
+      await send?.(record, '这轮的图片没能交给模型（数量、体积或格式超限），麻烦分开发一次。').catch(() => {})
+      return null
+    }
+  }
+
+  /**
    * 投递一轮。单条消息和「连发合并」后的整段，走的是同一条路。
    */
   function runTurn({ record, label, peerId, isGroup, client, body, maxTurnMs }) {
     // 2026-11-15 19:45 第 2 道闸：投递前给所有「【插件注入·…】」段落盖一个本轮随机码。
     //   这样历史里那几十条注入的码各不相同，它抄哪一条都不是「这一轮」的；
     //   输出侧据此分得清「抄最新的 / 翻历史的 / 现编的」。细节见 inject-tag.js。
-    const message = createUserMessage({
-      content: [{ type: 'text', text: stampFor(record, body) }],
-      source: { kind: 'user' },
-    })
+    // 2026-11-17：这一段的打码挪进 admitBody 了（带图时要先等附件准入，是异步的）。
     const startedAt = Date.now()
 
     manager.enqueue(record, async () => {
@@ -567,7 +637,9 @@ export function createInbound({ config, manager, logger, client, send, approval,
             .call('set_input_status', { user_id: Number(peerId), event_type: 1 }, 5000)
             .catch(() => {})
         }
-        record.agent.followup(message)
+        const content = await admitBody(record, body)
+        if (!content) return
+        record.agent.followup(createUserMessage({ content, source: { kind: 'user' } }))
 
         const outcome = await Promise.race([
           Promise.resolve(record.agent.whenIdle?.()).then(() => 'idle'),
@@ -666,6 +738,11 @@ export function createInbound({ config, manager, logger, client, send, approval,
       if (expanded) info.text = info.text ? `${info.text}\n${expanded}` : expanded
     }
 
+    // 记一下「这个会话最近一条带图 / 带语音的消息是哪条」：qq_images、qq_voice
+    // 不填 id 时要找它，而不是 lastMessageId（那可能是一条 @）。2026-11-17, #10 / #6。
+    if (info.images.length > 0) noteImageMessage(peerId, event.message_id)
+    if (info.records.length > 0) noteVoiceMessage(peerId, event.message_id)
+
     // 聊天流水：跳过的消息也先记下来——「它怎么突然接不上话」全靠这段回查。
     // 只落盘、不参与投递，写失败也不影响聊天。
     // 白名单外的落到 `聊天记录/_未开通/`（2026-10-26 姐姐定的）：留痕，不投递。
@@ -720,6 +797,9 @@ export function createInbound({ config, manager, logger, client, send, approval,
           userId: quotedUserId,
           name: quotedName,
           text: (quotedInfo.text || '[非文字内容]').replace(/\s+/g, ' ').slice(0, 80),
+          // 2026-11-17（issue #10）：被引用那条里的图以前直接丢了，
+          // 于是「引用这张图，这是什么」永远只得到一句「[非文字内容]」。
+          images: quotedInfo.images ?? [],
           ok: true,
         }
       } catch (err) {
@@ -746,9 +826,39 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 关着的时候它说什么都跟我们无关 —— 同类之间的帐先不算。
     if (peerBot && !config.botChatEnabled) {
       logger.debug?.(`[dsh-qq] ${label} 是同类机器人发言，「和同类聊天」没开，跳过`)
-      // 不接它的话，但它说了什么得留下 —— 下次真接的时候，得知道它刚讲过什么。
-      keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
+      // 2026-11-17 修 issue #16：这里以前还顺手 keepBacklog 一份，理由是
+      // 「下次真接的时候得知道它刚讲过什么」。但开关常关时那句永远用不上，
+      // 留底就只剩副作用：群里另一只 AI 一刷屏，30 条 backlog 全被它占掉，
+      // 真人说的话被挤出去，下一轮就照着它的话答。
+      // 要看它说过什么，聊天流水（聊天记录/<日期>.md）里一直都有。
       return
+    }
+
+    // ── 图片：到达就先落一份（2026-11-17, issue #10，delta7v3r 那条建议）──
+    // 以前下载绑在「投递」上：没 @、被间隔压住、被闸门挡下的图只会进 backlog，
+    // 而 backlog 行是纯文字占位——群里「先发图、再单发一条 @」时图压根没下来过，
+    // 之后怎么问都只有「图没进来」。现在在到达那一刻先下一份，路径写进 backlog 行；
+    // 下一轮真要投递时直接复用这份文件，不再下第二遍。
+    const earlyImages = []
+    if (info.images.length > 0) {
+      const dir = join(baseCacheDir, '到达', `${scope}-${peerId}`)
+      await mkdir(dir, { recursive: true }).catch(() => {})
+      for (const url of info.images.slice(0, 4)) {
+        const p = await downloadImage(url, dir, maxMB).catch(() => null)
+        if (p) earlyImages.push(p)
+      }
+      if (earlyImages.length > 0) pruneCache(dir)
+      else logger.warn?.(`[dsh-qq] 到达时图片没下下来（${info.images.length} 张）`)
+    }
+
+    /**
+     * backlog / 历史里那一行正文。
+     * 有图就把本地路径顶在行首（放在行尾会打断「重放时按结尾摘掉自己那句」的匹配）。
+     */
+    const backlogText = () => {
+      if (earlyImages.length === 0) return info.text || '[图片]'
+      const tag = `[图片: ${earlyImages.join(', ')}]`
+      return info.text ? `${tag} ${info.text}` : tag
     }
 
     // 同类机器人连着聊：到上限就散场（2026-10-29 姐姐定：「能私聊，但要能停」）。
@@ -766,7 +876,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
         peerChatTurns.set(peerId, { count, at: now })
         if (count > maxTurns) {
           logger.info(`[dsh-qq] ${label} 同类连聊到第 ${count} 轮（上限 ${maxTurns}），先不接`)
-          keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
+          keepBacklog(peerId, historyLine(sender, backlogText(), ownerInfo))
           return
         }
       }
@@ -784,7 +894,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
       // 保活期也不算 —— 否则别人一句「@ 那个谁 来帮我测一下」它也会冲上去接。
       if (info.atNames.length > 0) {
         logger.debug?.(`[dsh-qq] 群 ${peerId} @ 的是别人，跳过`)
-        keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
+        keepBacklog(peerId, historyLine(sender, backlogText(), ownerInfo))
         return
       }
 
@@ -817,7 +927,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
         if (idleExceeded) {
           closeWake(peerId, senderId)
           logger.debug?.(`[dsh-qq] 群 ${peerId} 保活窗里停太久（>${config.groupWakeIdleMs}ms），窗关掉，跳过`)
-          keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
+          keepBacklog(peerId, historyLine(sender, backlogText(), ownerInfo))
           return
         }
         if (!wakeAlive(peerId, senderId)) {
@@ -830,7 +940,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
           } else {
             logger.debug?.(`[dsh-qq] 群 ${peerId} 未 @ 且不在保活期，跳过`)
             // 这句没叫我们，但它是上下文的一部分：下一句很可能就在接它。
-            keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
+            keepBacklog(peerId, historyLine(sender, backlogText(), ownerInfo))
             return
           }
         }
@@ -849,7 +959,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
       logger.debug?.(
         `[dsh-qq] 群 ${peerId} 距上次回复不到 ${config.groupReplyGapMs}ms，先攒着（到点补回）`,
       )
-      keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
+      keepBacklog(peerId, historyLine(sender, backlogText(), ownerInfo))
       scheduleGapReplay(event, peerId, senderId)
       return
     }
@@ -859,7 +969,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
       logger.debug?.(
         `[dsh-qq] 群 ${peerId} 这个保活窗口已经回过 ${config.groupRepliesPerWindow} 次，先歇着`,
       )
-      keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
+      keepBacklog(peerId, historyLine(sender, backlogText(), ownerInfo))
       return
     }
 
@@ -959,13 +1069,33 @@ export function createInbound({ config, manager, logger, client, send, approval,
     record.lastMessageAt = Date.now()
     if (record.lastSenderName) record.label = label
 
-    // ── 图片：下载到本地，把路径交给 agent ──
+    // ── 图片：走宿主原生附件，作为内容块随这一轮投递 ──
+    //   2026-11-17（issue #10）：以前是下载到本地、把路径塞进正文，让 agent 自己调
+    //   `read_image` 去看——可插件创建的会话里根本没有这支工具（宿主只发安全工具），
+    //   于是它只能一遍遍回「图是黑的」。现在能走附件就走附件；走不了再退回老路。
+    let images = []
     let imagePaths = []
     if (info.images.length > 0) {
       await mkdir(cacheDir, { recursive: true }).catch(() => {})
-      imagePaths = (await Promise.all(info.images.slice(0, 4).map((u) => downloadImage(u, cacheDir, maxMB)))).filter(Boolean)
-      if (imagePaths.length > 0) pruneCache(cacheDir)
-      else logger.warn?.(`[dsh-qq] 图片下载失败（${info.images.length} 张）`)
+      const store = getAttachments?.()
+      if (store?.saveImages) {
+        try {
+          // 到达时已经下过一份就直接用那份，不再下第二遍（issue #10 里 delta7v3r 提的）。
+          images =
+            earlyImages.length > 0
+              ? await loadImagesFromPaths(earlyImages, store, cacheDir, maxMB)
+              : await loadImages(info.images.slice(0, 4), store, cacheDir, maxMB)
+          pruneCache(cacheDir)
+        } catch (err) {
+          logger.warn?.(`[dsh-qq] 图片没能交给模型（${err?.message ?? err}），退回只给路径`)
+          images = []
+        }
+      }
+      if (images.length === 0) {
+        imagePaths = (await Promise.all(info.images.slice(0, 4).map((u) => downloadImage(u, cacheDir, maxMB)))).filter(Boolean)
+        if (imagePaths.length > 0) pruneCache(cacheDir)
+        else logger.warn?.(`[dsh-qq] 图片下载失败（${info.images.length} 张）`)
+      }
     }
 
     // ── 文件：下载到本地，把路径交给 agent ──
@@ -1017,6 +1147,10 @@ export function createInbound({ config, manager, logger, client, send, approval,
           }
         }
       }
+      // 每条语音后面留这条消息的 id（issue #6）：想再听一遍 / 想拿到 wav 时，
+      // 用 qq_voice 传这个 id；不传就是「这个会话最近一条语音」。
+      const msgId = Number(event.message_id) || 0
+      if (msgId > 0) voiceTexts = voiceTexts.map((t) => `${t}（#msg=${msgId}）`)
     }
 
     // ── 引用提示：让 agent 知道这句话在接谁的话（被引用的原文上面已经查过了，这里不再请求）──
@@ -1056,10 +1190,50 @@ export function createInbound({ config, manager, logger, client, send, approval,
     if (gap) parts.push(gap)
     if (quoteLine) {
       parts.push(quoteLine, QUOTE_DIRECTION_HINT)
+      // 2026-11-17（issue #10）：引用一条带图的消息时，那张图也交给模型。
+      // 以前只留 80 字文本，图落在 quotedInfo.images 里没人拿——「引用这张图，这是什么」
+      // 永远只能得到一句「[引用了非文字内容]」。
+      if (quoteInfo?.images?.length) {
+        const store = getAttachments?.()
+        let quoteImages = []
+        if (store?.saveImages) {
+          try {
+            quoteImages = await loadImages(quoteInfo.images.slice(0, 4), store, cacheDir, maxMB)
+          } catch (err) {
+            logger.warn?.(`[dsh-qq] 引用里的图片没能交给模型：${err?.message ?? err}`)
+          }
+        }
+        if (quoteImages.length > 0) {
+          parts.push('[被引用那条消息里的图，对方是拿它在问你：]', quoteImages)
+        }
+      }
     }
-    let head = info.text || ''
-    if (isGroup) head = historyLine(sender, info.text || '[图片]', ownerInfo)
-    if (head) parts.push(head)
+    // 图文顺序：有原生图片块时，按「先说的话 / 图 / 后说的话」拼回去（2026-11-17, issue #10）；
+    // 没图就是一句普通正文。
+    let userBlocks = null
+    if (images.length > 0) {
+      userBlocks = []
+      if (isGroup) userBlocks.push({ type: 'text', text: historyLine(sender, '', ownerInfo) })
+      let start = 0
+      const pushText = (t) => {
+        if (t) userBlocks.push({ type: 'text', text: isGroup ? sealBody(t) : t })
+      }
+      const offsets = info.imageOffsets ?? []
+      images.forEach((block, i) => {
+        const offset = offsets[i]
+        if (typeof offset === 'number') {
+          pushText(info.text.slice(start, offset))
+          start = offset + '[图片]'.length
+        }
+        userBlocks.push(block)
+      })
+      pushText(info.text.slice(start))
+      parts.push(userBlocks)
+    } else {
+      let head = info.text || ''
+      if (isGroup) head = historyLine(sender, info.text || '[图片]', ownerInfo)
+      if (head) parts.push(head)
+    }
 
     // 群聊里没被 @、也不是引用着我的：给一个「可以不接」的出口。
     // 私聊、被 @、被引用回复这三种情况必须回，就不给出口 —— 该说话的时候别装死。
@@ -1078,9 +1252,15 @@ export function createInbound({ config, manager, logger, client, send, approval,
     })
     if (!mustReply) parts.push(SILENT_HINT)
 
-    if (imagePaths.length > 0) {
+    if (images.length > 0) {
+      // 图已经是这一轮的内容块了，只需要交代「怎么看」。
+      parts.push(IMAGE_RULES)
+      const hint = faceCollectRule(config)
+      if (hint) parts.push(hint)
+    } else if (imagePaths.length > 0) {
+      // 宿主没给附件服务时的老路：只能告诉它图存在本机哪，看得到是运气。
       parts.push(
-        `[用户发了 ${imagePaths.length} 张图片，已存到本机，可以直接用 read_image 打开：]`,
+        `[用户发了 ${imagePaths.length} 张图片，本机副本在：]`,
         ...imagePaths.map((p) => `  ${p}`),
         IMAGE_RULES,
       )
@@ -1145,6 +1325,9 @@ export function createInbound({ config, manager, logger, client, send, approval,
               .split(/[\\/]/)
               .pop()
               .replace(/\.[^.]+$/, ''),
+        // 首行再带上「跟谁的对话」（2026-11-17 修 issue #9）：同一个号跟两个人
+        // 私聊时，光有上面那个 label 还是会撞标题。
+        peerLabel: isGroup ? '' : peerLabelOf(record),
         faces: facesForPrompt(config, 12),
         facts: loadFactsFor(record),
         factsFile: factsFileFor(record),
@@ -1205,7 +1388,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const doorNotice = doorLine(config)
     if (doorNotice) parts.unshift(doorNotice, '')
 
-    const body = parts.join('\n')
+    // 2026-11-17（issue #10）：parts 里可能夹着图片块数组，拼成 content 数组再往下走。
+    const body = joinContent(parts)
 
     logger.info?.(`[dsh-qq] ← ${label}: ${(info.text || '[图片]').slice(0, 60)}`)
 
@@ -1230,7 +1414,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 作息：休息时段（或在说了晚安之后）收到的私聊先记着，不回 —— 早上一起交出去。
     // 放在合并之前，因为「等待 5 秒」对一条要等到明早的消息没有意义。
     if (sleep?.shouldHold?.(record)) {
-      sleep.hold(record, info.text || '[图片]')
+      // 夜里攒的话：图片块一起存着，早上原样交出去（2026-11-17, issue #10）
+      sleep.hold(record, info.text || '[图片]', undefined, userBlocks ?? undefined)
       return
     }
     // 说了晚安：这条仍然正常回（得有人应一句），但之后不再回。
@@ -1253,7 +1438,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
         mergeBatches.delete(key)
         const count = batch.bodies.length
         if (count > 1) logger.info?.(`[dsh-qq] ${label} 连发 ${count} 条，合并成一轮回`)
-        runTurn({ ...batch.meta, body: batch.bodies.join('\n\n'), maxTurnMs })
+        runTurn({ ...batch.meta, body: joinContent(batch.bodies, '\n\n'), maxTurnMs })
       }, windowMs)
       return
     }
