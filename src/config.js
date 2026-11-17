@@ -79,9 +79,10 @@ export const ConfigSchema = Schema.object({
   memoryRoot: Schema.string()
     .default('')
     .description(
-      '全家共用的记忆区根目录（比如 D:/鲸鲸的专用文件/本地记忆区）。填了才注册 `qq_memo` 这支笔：' +
-        '会话的工作目录在 peer 目录里，agent 自己的写工具出不去（文件沙箱按会话工作目录算）；' +
-        '要往全家的日记、今天.md、项目文档里写，就靠它代笔——插件跑在宿主进程里，直接写文件，不受 agent 沙箱限制。留空 = 关掉这支笔',
+      '`qq_memo` 这支笔的根目录 = 这个会话自己的记忆区（比如 D:/鲸鲸的专用文件/QQ会话/老二/记忆区）。' +
+        '填了才注册：会话的工作目录在 peer 目录里，agent 自己的写工具出不去（文件沙箱按会话工作目录算）；' +
+        '要往自己的日记、待续.md、项目文档里写，就靠它代笔——插件跑在宿主进程里，直接写文件，不受 agent 沙箱限制。' +
+        '⚠️ 别指向别人的记忆区：2026-11-08 之前三只都指全家的本地记忆区，老二的日记写进了大姐那边。留空 = 关掉这支笔',
     ),
   persona: Schema.string()
     .default('')
@@ -336,6 +337,9 @@ export const ConfigSchema = Schema.object({
   proactiveQuietHours: Schema.string()
     .default('23:00-08:00')
     .description('静默时段：这段时间不主动开口。格式 HH:MM-HH:MM，留空 = 不限'),
+  proactiveGroupEnabled: Schema.boolean()
+    .default(true)
+    .description('群聊里也参与主动开口（冷场冒泡）。false = 只对私聊主动，群里只在被叫时开口'),
 
   // ── 作息（睡前提醒 / 晚安静默 / 夜里消息留到早上） ──
   sleepMode: Schema.boolean()

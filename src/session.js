@@ -1,4 +1,5 @@
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { deriveSessionId, sessionKey } from './shared/session-id.js'
 import { ensurePeerWorkspace, resolvePeerWorkspace } from './workspace.js'
 import { loadHandoffFor } from './settings.js'
@@ -16,6 +17,48 @@ import { createSessionState } from './session-state.js'
  * 只认 cwd / parentSession / seedLength / origin / delegationDepth / agentPreset，
  * 塞自定义键会被 session 边界拒绝，所以这里不往里放业务字段。
  */
+/**
+ * 账本按号分文件（2026-11-09 修）。
+ *
+ * 病：老大/老二/老三共用 `$DSH_HOME/dsh-qq/session-state.json`。三个进程各自在启动时读
+ * 一份快照进内存，之后每写一条就**把整份快照写回**——谁最后写谁赢，别人刚记的东西全被抹掉。
+ *
+ * 11-09 09:53 老大「早上好」打了两次，根就在这：
+ *   11-08 19:43 重启，旧宿主还占着 `-rmw75f8na` 的写句柄，插件换壳成 `-rmw75f8na-rmw7rkfrw`
+ *   并把新 id 记进账本；同一分钟老二、老三也在启动，拿着自己那份旧快照整份写回，
+ *   把老大的新 id 覆盖回了 `-rmw75f8na`。11-09 09:52 再重启，就接回老壳——
+ *   那段壳的历史停在 11-08 19:16，今早 08:00 之后的对话在另一个壳里，它看不见，
+ *   于是以为「上次说话是昨晚」，重新打了招呼。
+ *
+ * 所以：文件名带上 selfId，一个号一本，谁也不覆盖谁。
+ * 旧文件不删，第一次启动时把属于本号的条目挑出来迁过去（一次性的）。
+ */
+export function openLedger(home, name, selfId, logger, pick) {
+  if (!home) return ''
+  const file = join(String(home), `${name}-${selfId}.json`)
+  const legacy = join(String(home), `${name}.json`)
+  if (existsSync(file) || !existsSync(legacy)) return file
+  try {
+    const raw = JSON.parse(readFileSync(legacy, 'utf8'))
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return file
+    const mine = pick ? pick(raw, String(selfId)) : raw
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, JSON.stringify(mine, null, 2), 'utf8')
+    logger?.info?.(`[dsh-qq] 账本 ${name}.json 里本号那几条已迁到 ${name}-${selfId}.json`)
+  } catch (err) {
+    logger?.warn?.(`[dsh-qq] 迁 ${name} 账本失败，本号从空账开始:`, err?.message ?? err)
+  }
+  return file
+}
+
+/** 从共用账本里只挑本号的键：`gens` / `sessions` 的键都以 `qq:<号>:` 开头；`turns` 按 sessionId 记，整份带走。 */
+export function mineOnly(raw, selfId) {
+  const prefix = `qq:${selfId}:`
+  const pick = (obj) =>
+    Object.fromEntries(Object.entries(obj ?? {}).filter(([k]) => typeof k === 'string' && k.startsWith(prefix)))
+  return { gens: pick(raw.gens), sessions: pick(raw.sessions), turns: raw.turns ?? {} }
+}
+
 export class SessionManager {
   #records = new Map() // sessionId -> record
   #byPeer = new Map() // peerKey -> sessionId
@@ -31,10 +74,14 @@ export class SessionManager {
     this.logger = logger
     this.closed = false
     // 「这个会话已经注入过聊天规矩」的账本：落盘，宿主重启/回收后别再注一遍。
-    this.injectState = createInjectState(home ? join(String(home), 'inject-state.json') : '', logger)
+    this.injectState = createInjectState(openLedger(home, 'inject-state', selfId, logger), logger)
     // 「reset 到第几代 / 这一代落在哪个 sessionId」的账本：也落盘。
     // 不落盘的后果见 session-state.js 顶上那段 —— 重启即退回 reset 前的老会话 + 每次多一个空壳。
-    this.sessionState = createSessionState(home ? join(String(home), 'session-state.json') : '', logger)
+    // 2026-11-09：路径带上 selfId，三个号各一本，别互相覆盖（原因见 openLedger 的注释）。
+    this.sessionState = createSessionState(
+      openLedger(home, 'session-state', selfId, logger, mineOnly),
+      logger,
+    )
     /** 回收前的保留判断（由 sleep 模块注入）：返回 true 就不回收。 */
     this.keeper = null
   }
