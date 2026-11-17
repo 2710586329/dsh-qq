@@ -255,9 +255,13 @@ export function apply(ctx, config) {
   const mountSettingsApi = (extra = {}) => {
     // 测试桩 / 极简宿主可能没有 ctx.inject，这时候跳过就好，别让整个插件崩
     if (typeof ctx.inject !== 'function') return
-    ctx.inject(['webServer'], (sub) =>
-      installSettingsApi({ ctx, webServer: sub.webServer, config, logger, ...extra }),
-    )
+    ctx.inject(['webServer'], (sub) => {
+      // 2026-11-17 修 issue #8：回调的返回值会被 cordis 当成 effect 收下，
+      // 而 installSettingsApi() 返回的是 boolean（mounted）。直接 `=> installSettingsApi(...)`
+      // 等于 return true，每次启动都多留一个失败的子 fiber：TypeError: Invalid effect。
+      // 所以这里用块体，什么都不返回。
+      installSettingsApi({ ctx, webServer: sub.webServer, config, logger, ...extra })
+    })
   }
 
   // 只当「设置面板」用：桌面 / Web GUI 那份只提供这一页，不去连 NapCat。
@@ -502,12 +506,27 @@ const pin = createPin({ config, logger })
 
   const contextGuard = createContextGuard({ manager, config, logger })
   const wake = createWake({ config, manager, logger, bridge, pin })
-  const bedtime = createSleep({ config, manager, logger })
+
+  // 2026-11-17（issue #10）：QQ 里的图要让模型真能看见，得借宿主的附件服务。
+  // 插件自己创建的会话没有 read_image 这支工具，光给路径等于给它一张看不清的脸。
+  // 宿主不提供 attachments（老版本 / headless 极简宿主）时退回老路：只给本地路径。
+  let attachments
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['attachments'], (sub) => {
+      attachments = sub.attachments
+      sub.on('dispose', () => {
+        attachments = undefined
+      })
+    })
+  }
+  const getAttachments = () => attachments
+
+  const bedtime = createSleep({ config, manager, logger, send, getAttachments })
   // 夜里的读书问询：默认关，本地 profile 打开才有（见 config.js 的 reading* 一组）
   const reading = createReading({ config, manager, logger })
   // 睡着的会话不回收：回收后 tick/wake 都遍历不到它，早上攒的消息就交不出去
   manager.keeper = (record) => bedtime.isHolding(record)
-  const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime, bridge, pin })
+  const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime, bridge, pin, getAttachments })
   const outbound = createOutbound({ manager, config, logger, send, wake })
 
   // 群黑话 / 角色知识学习：每 20 分钟扫一次群聊记录，把「鲸鲸自己卡壳」的地方

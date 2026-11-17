@@ -65,7 +65,7 @@ export function looksLikeGoodnight(text, words = []) {
   return words.some((w) => w && s.includes(w))
 }
 
-export function createSleep({ config, manager, logger }) {
+export function createSleep({ config, manager, logger, send, getAttachments }) {
   const states = new Map() // sessionId -> { sleeping, wakeAt, pending, pendingSince, remindedOn }
   let timer = null
   let stopped = true
@@ -117,14 +117,19 @@ export function createSleep({ config, manager, logger }) {
     return inSleepWindow(now)
   }
 
-  /** 把消息留在队列里，等早上一起交出去。 */
-  function hold(record, text, now = new Date()) {
+  /**
+   * 把消息留在队列里，等早上一起交出去。
+   * 2026-11-17（issue #10）：`content` 是可带图的内容块（夜里发来的图），
+   * 早上交出去时原样接上——以前只留一句 `[图片]`，图就永远没人看得见。
+   */
+  function hold(record, text, now = new Date(), content) {
     if (!record?.sessionId) return false
     const st = stateOf(record)
     if (!st.pending.length) st.pendingSince = now.getTime()
     st.pending.push({
       at: `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`,
       text: String(text ?? '').slice(0, 500),
+      ...(content ? { content } : {}),
     })
     logger.info?.(`[dsh-qq] ${record.label} 休息中，先记着（第 ${st.pending.length} 条，早上再说）`)
     return true
@@ -182,15 +187,28 @@ export function createSleep({ config, manager, logger }) {
   }
 
   /** 往会话里投一段（跟 wake.js 同一套：必须是完整的消息对象）。 */
-  function fire(record, text, tag) {
+  function fire(record, text, tag, items = []) {
     manager.enqueue(record, async () => {
       try {
-        record.agent.followup(
-          createUserMessage({
-            content: [{ type: 'text', text: stampFor(record, text) }],
-            source: { kind: 'user' },
-          }),
-        )
+        // 2026-11-17（issue #10）：夜里攒下的消息里可能带图。
+        // 主文案（早安汇总那条注入）照旧打本轮码；攒着的原话是对方自己说的，
+        // 不为图片重开路再打一次码——一轮只能有一个码，打两回会把 record.injectTag 覆盖掉。
+        let content = [{ type: 'text', text: stampFor(record, text) }]
+        if (items.some((item) => item.content)) {
+          try {
+            const extra = []
+            for (const item of items) {
+              extra.push({ type: 'text', text: `\n${item.at} ` })
+              if (item.content) extra.push(...item.content)
+              else extra.push({ type: 'text', text: String(item.text ?? '') })
+            }
+            content = await getAttachments().admitPromptContent([...content, ...extra])
+          } catch {
+            await send?.(record, '夜里那几条消息带着图片，我没能交给模型——麻烦再发一次。')
+            return
+          }
+        }
+        record.agent.followup(createUserMessage({ content, source: { kind: 'user' } }))
         await Promise.race([
           Promise.resolve(record.agent.whenIdle?.()).then(() => 'idle'),
           new Promise((resolve) => {
@@ -235,7 +253,7 @@ export function createSleep({ config, manager, logger }) {
         st.sleeping = false
         st.wakeAt = 0
         logger.info?.(`[dsh-qq] ${record.label} 早上了，把夜里攒的 ${items.length} 条交出去`)
-        fire(record, morningRule(config, { label: record.label, items, now }), '早安汇总')
+        fire(record, morningRule(config, { label: record.label, items, now }), '早安汇总', items)
         continue
       }
 

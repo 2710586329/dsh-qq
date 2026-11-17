@@ -113,6 +113,9 @@ export function readMessage(message, { selfId, selfName = '' } = {}) {
 
   let text = ''
   const images = []
+  // 每张图在正文里的起点（2026-11-17，issue #10）：图文混排时靠它把
+  // 「先说的话 / 图 / 后说的话」还原成同一顺序，不然图全挤到末尾。
+  const imageOffsets = []
   const files = []
   const records = []
   const mfaces = []
@@ -148,6 +151,7 @@ export function readMessage(message, { selfId, selfName = '' } = {}) {
       }
       case 'image':
         images.push(data.url || data.file || '')
+        imageOffsets.push(text.length)
         text += '[图片]'
         break
       case 'face':
@@ -218,6 +222,10 @@ export function readMessage(message, { selfId, selfName = '' } = {}) {
   return {
     text: text.trim(),
     images,
+    // 偏移要跟着 trimStart 挪一下，否则首行有空格时图文顺序会错位。
+    ...(images.length
+      ? { imageOffsets: imageOffsets.map((offset) => offset - (text.length - text.trimStart().length)) }
+      : {}),
     files,
     records,
     mfaces,
