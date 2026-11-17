@@ -2,7 +2,7 @@
 
 本文件记录 dsh-qq 的版本变更。格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号照 [SemVer](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.4.0] - 2026-11-17
 
 ### 修复
 
@@ -14,6 +14,22 @@
   - 重复的那句由既有的 `collapseRepeats` 合并，两者合起来 19:02 那条只剩 `天都黑了，这半天没听见响动——晚饭吃过了没`。
 - `test/selfcheck-leak-1114.test.mjs` 新增 6 条钉子：19:02 原样 fixture、19:07 `这一段重复了` fixture、无空行的挤压版、单行「可以。」不误伤、带「你」的收尾句不误伤、正常多行正文不误伤。
   - **三份 profile 里的是实体拷贝，不是 junction**：`%DSH_HOME%\profiles\qq-laoda|qq-laoer|qqbot\node_modules\dsh-qq\src\sanitize.js` 要一起覆盖，改完重启三个 QQ 机器人。
+- **issue #18：长会话里它开始「先分类再回」，越想越绕**（ConiglioCaffe 提的）。提示词里写着「先判断对方这句话属于哪种：打招呼 / 问事实 / 带情绪 / 开玩笑」，模型照着做，于是正文里出现「三条：」「正文：」这种草稿标题，规矩之间还互相打架。删掉整段分类要求，换成「别分类、别写草稿标题，想清楚直接说」+「长度跟着对方的话走」；`BUILTIN_RULES` 里「别一轮连发三条以上」这种具体条数也去掉（跟「别拆成一条一句」本来就重复，只会让它数着发）。
+- **issue #17：`textReply` 写在 settings.json 里被静默丢掉**（delta7v3r 提的）。`OVERRIDABLE` 白名单漏了 `textReply` / `textReplyFallback`，于是 1.3.0 那个「正文不再自动发」的开关只对默认值生效，谁都改不回来。补进白名单；`sanitizeOverrides()` 里未知键的日志从 debug 升成 warn，并写明「要改宿主级配置请改 profile 的 cordis.patch.yml」。
+- **issue #16：另一只机器人刷屏会把群聊留底挤满**（delta7v3r 提的）。`botChatEnabled` 关着时 peerBot 分支先 `keepBacklog` 再 return——那句话永远不会进上下文（开关常关），留底只剩副作用：另一只 AI 每说一句就占一格，30 格很快被占满，真群友的话全被挤掉。改成直接 return。
+- **issue #9：同一个号跟不同人私聊，标题全撞**（0r1ad-114 提的）。会话标题取的是注入提示词首行，原来只写「【私聊·<号的名字>】和另一个人的对话」，同号对不同人全是同一行。`privateRules()` 加 `peerLabel`，首行改成「和 昵称(QQ号) 的对话」；`inbound.js` 新增 `peerLabelOf(record)`，私聊时把对方的昵称和 QQ 号一起传进去。
+- **issue #15：AGENTS.md 模板里写死了本机绝对路径**（delta7v3r 提的）。`D:/鲸鲸的专用文件/本地记忆区/今天.md`、`大纲/索引.md`、`QQ会话/老大/.../话头.md` 三处硬编码，别人装上就是错的指引。改成按新配置 `familyRoot` 拼；没配就明写「路径问姐姐要，别自己猜」。顺带把 `ensureSharedBriefing()` 的判重从「标题字符串在不在」改成版本注释 `<!-- dsh-qq:shared-briefing:v2 -->`——老版本追加过的那份也算已有，不会重复铺。
+- **issue #14（前半）：`preset` 一直没传给会话**。`#attach()` 只塞 provider/model，`config.preset` 从声明那天起就是摆设（也是 #4 那种「换 preset 没用」的来源）。现在有值就传；同时补 `config.reasoningEffort`（空 = 用模型默认）。宿主不认的字段会被忽略，不致命。
+
+### 新增
+
+- **issue #10：图片改成宿主原生多模态附件，它真的能看见了**。根子不在插件：插件创建的会话里工具面是宿主给的那 31 支，**没有 `read_image`**，所以「下载到本地、把路径塞进正文让它自己打开」这条路对它等于不存在，永远只能说「图是黑的」。新建 `src/native-images.js`，走 `attachments.saveImages()` + `admitPromptContent()`，图作为 `{ type: 'image', attachment }` 内容块直接进这一轮的用户消息：
+  - `ctx.inject(['attachments'])` 拿到附件服务（`index.js`），`inbound.js` 用 `joinContent()` 把「文字 / 图 / 文字」按原顺序拼回一份 content；`segment.js` 记下每张图的文字偏移，图文混排不再把图全挤到末尾。
+  - **到达那一刻就先下**：群聊「先发图、再单发一条 @」时，图那条往往没被叫醒，只进留底；现在同类机器人闸门之后就下，留底行写成 `[图片: 路径] 正文`，图不再从上下文里消失。
+  - **引用里的图**：被引用那条消息的图以前只留住了文本，`quotedInfo.images` 从没交出去；现在跟着这一轮一起给模型。
+  - `qq_images` 保留当兜底，不填 id 时找「这个会话最近一条带图的消息」（不是最近一条——那条可能正是 @）。
+  - 体积上限：只认 QQ 自己的 4 个 CDN 域名、只认 PNG/JPEG/GIF/WEBP、单张 ≤8 MB、张数跟宿主 `imageLimits` 走。
+- **issue #6：语音能收能发了**。新增 `qq_send_voice({ file })`（wav / mp3 / amr / silk / ogg / flac / m4a，>10 MB 直接拒，NapCat 自己转语音格式）和 `qq_voice({ message_id? })`（把那条语音转成本机 wav、开了 ASR 顺手给文字；不填 id 找最近一条语音）。收到的语音在转写后面带上 `（#msg=123456）`，想再听一遍时有 id 可传。
 
 ## [1.3.3] - 2026-11-12
 
