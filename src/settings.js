@@ -68,6 +68,10 @@ export const OVERRIDABLE = [
   'splitDelayMs',
   'streamReply',
   'streamMaxChunks',
+  // 2026-11-17 补（issue #17）：这两个一直能配，却不在白名单里，
+  // settings.json 里写了会被静默丢掉——想回退到「正文自动发」的人找不到路。
+  'textReply',
+  'textReplyFallback',
   // 表情包
   'faceCollectHint',
   'faceSendGapMs',
@@ -182,7 +186,11 @@ export function sanitizeOverrides(input, logger) {
     out[key] = value
   }
   const dropped = Object.keys(input).filter((k) => !OVERRIDABLE.includes(k))
-  if (dropped.length > 0) logger?.debug?.(`设置里有不认识的键，忽略: ${dropped.join(', ')}`)
+  // 2026-11-17 改（issue #17）：原来只打 debug ——「键名写对了、放错了地方」这种
+  // 最难查的情况全靠猜。升成 warn，一句话就能把路指出来。
+  if (dropped.length > 0) {
+    logger?.warn?.(`设置里这些键不认识，已忽略：${dropped.join(', ')}（要改宿主级配置请改 profile 的 cordis.patch.yml）`)
+  }
   return out
 }
 

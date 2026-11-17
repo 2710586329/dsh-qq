@@ -280,7 +280,7 @@ export class SessionManager {
     if (!dir) return null
     if (this.#ready.get(dir)) return dir
     try {
-      await ensurePeerWorkspace(dir, info)
+      await ensurePeerWorkspace(dir, info, this.config)
       this.#ready.set(dir, true)
     } catch (err) {
       // 铺不出来就不要把会话钉死在半成品目录上，退回宿主 cwd
@@ -294,6 +294,14 @@ export class SessionManager {
     const agentOptions = {}
     if (this.config.provider) agentOptions.provider = this.config.provider
     if (this.config.model) agentOptions.model = this.config.model
+    // 2026-11-17 修 issue #14：`preset` 从 1.0 起就写在配置表里、说明里也写着
+    // 「留空跟随宿主」，但从没传给会话——填了等于没填。一起补上。
+    // reasoningEffort 同理（issue #11 里那条 400 也跟它有关：宿主按默认算推理档，
+    // 想换档的人没有开关）。
+    if (String(this.config.preset ?? '').trim()) agentOptions.preset = String(this.config.preset).trim()
+    if (String(this.config.reasoningEffort ?? '').trim()) {
+      agentOptions.reasoningEffort = String(this.config.reasoningEffort).trim()
+    }
 
     const hasAgentOptions = Object.keys(agentOptions).length > 0
     const cwd = await this.#peerDir(info)

@@ -40,15 +40,33 @@ async function exists(path) {
 }
 
 /** 「共享底稿」那一节：新铺的模板和老会话补的都取这一份文字，免得两处写歪。 */
-const SHARED_BRIEFING_MARK = '## 共享底稿'
+// 2026-11-17（issue #15）：判定改用带版本号的注释，不再拿标题字符串当锚——
+// 谁把那一节的标题改了，旧代码会以为「没有这一节」，下次启动再追加一份旧内容。
+const SHARED_BRIEFING_MARK = '<!-- dsh-qq:shared-briefing:v2 -->'
+const SHARED_BRIEFING_TITLE = '## 共享底稿'
 
-function sharedBriefingSection() {
-  return `## 共享底稿（开聊前先读一遍）
+function sharedBriefingSection(config = {}) {
+  // 2026-11-17 修 issue #15：这里原来硬编码了作者本机的三条绝对路径，
+  // 换一个人、换一台机器用，那三条必然不存在——模型照着去读只会读到空，
+  // 还可能据此断定「她没记过任何东西」（写入成功、读取为空，最难查的一种）。
+  // 现在按 `config.familyRoot` 拼；没配就明说「路径问姐姐，别猜」。
+  const familyRoot = String(config?.familyRoot ?? '').trim().replace(/[\\/]+$/, '')
+  const familyLines = familyRoot
+    ? [
+        `- 全家共用的底稿：\`${familyRoot}/本地记忆区/今天.md\``,
+        '  —— 今天家里出了什么事、定了什么、还差什么。消息进来时先扫一眼，别只知道自己这一格。',
+        `- 更早的事：\`${familyRoot}/本地记忆区/大纲/索引.md\`。`,
+        '- 桌面端和 QQ 这边如果约定过一份同步文件（话头 / 待续之类），路径问姐姐。',
+      ].join('\n')
+    : [
+        '- 这台机器上可能有一份「全家共用的底稿」：今天出了什么事、定了什么、还差什么。',
+        '  **路径问姐姐要，别自己猜**——猜出来的路径读着是空的，你会以为自己记过、或者她没记过。',
+      ].join('\n')
 
-- 全家共用的底稿：\`D:/鲸鲸的专用文件/本地记忆区/今天.md\`
-  —— 今天家里出了什么事、定了什么、还差什么。消息进来时先扫一眼，别只知道自己这一格。
-- 更早的事：\`D:/鲸鲸的专用文件/本地记忆区/大纲/索引.md\`。
-- 桌面端写给 QQ 这边的流水：\`D:/鲸鲸的专用文件/QQ会话/老大/私聊_2710586329/话头.md\`。
+  return `${SHARED_BRIEFING_MARK}
+## 共享底稿（开聊前先读一遍）
+
+${familyLines}
 - **往你自己的记忆区里写，用 \`qq_memo\` 这支笔**（2026-11-08 改：原来三只都指向全家的本地记忆区，老二的日记会串到大姐那边）：
   你自己的 write / edit 只能落在本会话目录里，记忆区在上一级、会被文件沙箱拦下；
   \`qq_memo\` 是插件代笔，根目录就是这个 profile 里配的 memoryRoot，能写进去。比如
@@ -61,7 +79,7 @@ function sharedBriefingSection() {
 `
 }
 
-function agentsTemplate({ scope, peerId, label }) {
+function agentsTemplate({ scope, peerId, label }, config = {}) {
   // label 形如「私聊 昵称(QQ号)」/「群 群号」，本身就是给人看的一句话，直接用
   const who = String(label || '').trim() || (scope === 'group' ? `群 ${peerId}` : `私聊 ${peerId}`)
   return `# 这个会话的工作目录
@@ -69,7 +87,7 @@ function agentsTemplate({ scope, peerId, label }) {
 这里是 **${who}** 自己的目录，只属于这一段对话。别的 QQ 会话有它们自己的目录，
 彼此不共享文件，也不要去翻别人的。
 
-${sharedBriefingSection()}
+${sharedBriefingSection(config)}
 ## 记忆区
 
 - 根目录：\`./记忆区/\`
@@ -109,7 +127,7 @@ ${sharedBriefingSection()}
  * 确保会话目录与记忆区骨架存在。已存在就不覆盖（用户可能自己改过 AGENTS.md）。
  * @returns {Promise<string>} 目录路径
  */
-export async function ensurePeerWorkspace(dir, info) {
+export async function ensurePeerWorkspace(dir, info, config = {}) {
   await mkdir(join(dir, '记忆区', '日记'), { recursive: true })
   await mkdir(join(dir, '记忆区', '项目'), { recursive: true })
   await mkdir(join(dir, '记忆区', '大纲'), { recursive: true })
@@ -118,9 +136,9 @@ export async function ensurePeerWorkspace(dir, info) {
 
   const agentsPath = join(dir, 'AGENTS.md')
   if (!(await exists(agentsPath))) {
-    await writeFile(agentsPath, agentsTemplate(info), 'utf8')
+    await writeFile(agentsPath, agentsTemplate(info, config), 'utf8')
   } else {
-    await ensureSharedBriefing(agentsPath)
+    await ensureSharedBriefing(agentsPath, config)
   }
 
   const indexPath = join(dir, '记忆区', '大纲', '索引.md')
@@ -138,11 +156,12 @@ export async function ensurePeerWorkspace(dir, info) {
  * 老会话的 AGENTS.md 是旧模板铺的：缺「共享底稿」就补一节，别的字一个不动。
  * 铺不进去也不算错——不能因为这一节把整个会话卡住。
  */
-async function ensureSharedBriefing(agentsPath) {
+async function ensureSharedBriefing(agentsPath, config = {}) {
   try {
     const text = await readFile(agentsPath, 'utf8')
-    if (text.includes(SHARED_BRIEFING_MARK)) return
-    await appendFile(agentsPath, `\n${sharedBriefingSection()}`, 'utf8')
+    // 老文件没有版本注释、但有标题：也算已有，别重复追加（兼容 11-17 之前铺的模板）。
+    if (text.includes(SHARED_BRIEFING_MARK) || text.includes(SHARED_BRIEFING_TITLE)) return
+    await appendFile(agentsPath, `\n${sharedBriefingSection(config)}`, 'utf8')
   } catch {
     /* 读不到/写不进就跳过 */
   }

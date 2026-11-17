@@ -54,6 +54,12 @@ export const ConfigSchema = Schema.object({
   provider: Schema.string().description('LLM provider 名称；留空跟随宿主默认'),
   model: Schema.string().description('模型名；留空跟随宿主默认'),
   preset: Schema.string().description('Agent preset id；留空使用宿主默认组合（unset = 跟随宿主）'),
+  reasoningEffort: Schema.string()
+    .default('')
+    .description(
+      '推理等级：填该模型公布的 reasoningEfforts 值（比如 low / medium / high）。留空 = 用模型默认。' +
+        '2026-11-17 补（issue #14）：以前这一项根本不可配，只能吃宿主的默认档',
+    ),
   cwd: Schema.string().description('Agent 工作目录；留空使用宿主默认'),
   uiOnly: Schema.boolean()
     .default(false)
@@ -88,6 +94,13 @@ export const ConfigSchema = Schema.object({
     .default('')
     .description(
       '角色设定：它是谁、什么性格、怎么称呼对方。留空则是一只没有名字、说话正常的普通助手——插件不会自带任何人的私人设定',
+    ),
+  familyRoot: Schema.string()
+    .default('')
+    .description(
+      '全家的根目录（= 里面含 `本地记忆区/今天.md`、`本地记忆区/大纲/索引.md` 的那一层，比如 D:/鲸鲸的专用文件）。' +
+        '2026-11-17 补（issue #15）：会话 AGENTS.md 的「共享底稿」那一节原来把这台机器上的三条绝对路径写死在里面，' +
+        '换个人用必然读不到。配了这一项就写真实路径；留空则改成「路径问姐姐要，别猜」——不写死别人的本机路径',
     ),
   personaFile: Schema.string()
     .default('')
